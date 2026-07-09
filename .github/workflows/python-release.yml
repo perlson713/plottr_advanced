@@ -1,0 +1,32 @@
+name: Upload Python Package
+
+on:
+  push:
+    tags:
+      - v*
+
+jobs:
+  deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+    - name: Set up Python
+      uses: actions/setup-python@v6.2.0
+      with:
+        python-version: '3.12'
+    - uses: ./.github/actions/install-dependencies-and-plottr
+    - name: Install build deps
+      run: pip install --upgrade build
+    - name: Build
+      run: |
+        python -m build
+    - name: Install Twine
+      run: pip install twine
+    - name: Publish
+      env:
+        TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+        TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+      run: |
+        twine upload dist/*
