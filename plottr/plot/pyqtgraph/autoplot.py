@@ -324,7 +324,7 @@ class AutoPlot(PlotWidget):
                 dvals = self.data.data_vals(dep)
                 pdt = determinePlotDataType(self.data.extract([dep]))
                 plotOptions = {}
-                yerr = errorBarData(self.data, dep)
+                yerr = errorBarData(self.data, dep) if self.figOptions.showErrorBars else None
                 if yerr is not None:
                     plotOptions['_errorBarData'] = yerr
                 plotId = fm.addData(
@@ -414,6 +414,9 @@ class FigureOptions:
     #: whether to plot all 1D traces into a single panel
     combineLinePlots: bool = False
 
+    #: whether to show y error bars when the data provides them
+    showErrorBars: bool = True
+
     #: how to represent complex data
     complexRepresentation: ComplexRepresentation = ComplexRepresentation.realAndImag
 
@@ -455,6 +458,14 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
         combineLinePlots.triggered.connect(
             lambda: self._setOption('combineLinePlots',
                                     combineLinePlots.isChecked())
+        )
+
+        showErrorBars = self.addAction("Error bars")
+        showErrorBars.setCheckable(True)
+        showErrorBars.setChecked(self.options.showErrorBars)
+        showErrorBars.triggered.connect(
+            lambda: self._setOption('showErrorBars',
+                                    showErrorBars.isChecked())
         )
         complexOptions = QtWidgets.QMenu(parent=self)
         complexGroup = QtWidgets.QActionGroup(complexOptions)
@@ -504,15 +515,15 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
         complexButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         complexButton.setMenu(complexOptions)
 
-        #stylistic edit to ensure that complexButton is the second button, also to ensure that the updateComplexButton removes the correct button
-        if len(self.actions()) == 1:
+        # Keep the dynamic complex menu after the fixed toggle actions.
+        if len(self.actions()) == 2:
             self.addWidget(complexButton)
         else:
-            self.insertAction(self.actions()[1],self.addWidget(complexButton))
+            self.insertAction(self.actions()[2],self.addWidget(complexButton))
         return True
 
     def updateComplexButton(self) -> bool:
-        #remove the second action in the list (currently corresponding to the complexRepresentation button)
-        self.removeAction(self.actions()[1])
+        # Remove the action currently corresponding to the complex menu.
+        self.removeAction(self.actions()[2])
         self._createComplexRepresentation()
         return True

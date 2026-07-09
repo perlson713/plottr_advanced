@@ -161,6 +161,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
     #: signal emitted when the complex data option has been changed
     complexRepresentationSelected = Signal(ComplexRepresentation)
 
+    #: signal emitted when error-bar visibility has been changed
+    errorBarsSelected = Signal(bool)
+
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
 
@@ -225,6 +228,14 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.plotComplexPlane.setCheckable(True)
         self.plotComplexPlane.triggered.connect(
             lambda: self.selectComplexType(ComplexRepresentation.complexPlane))
+
+        self.addSeparator()
+
+        self.showErrorBars = self.addAction('Error bars')
+        self.showErrorBars.setCheckable(True)
+        self.showErrorBars.setChecked(True)
+        self.showErrorBars.triggered.connect(
+            lambda: self.errorBarsSelected.emit(self.showErrorBars.isChecked()))
 
         self.plotTypeActions = OrderedDict({
             PlotType.multitraces: self.plotasMultiTraces,
@@ -369,6 +380,7 @@ class AutoPlot(MPLPlotWidget):
 
         # The default complex behavior is set here.
         self.complexRepresentation = ComplexRepresentation.realAndImag
+        self.showErrorBars = True
 
         # A toolbar for configuring the plot
         self.plotOptionsToolBar = AutoPlotToolBar('Plot options', self)
@@ -380,6 +392,9 @@ class AutoPlot(MPLPlotWidget):
         )
         self.plotOptionsToolBar.complexRepresentationSelected.connect(
             self._complexPreferenceFromToolBar
+        )
+        self.plotOptionsToolBar.errorBarsSelected.connect(
+            self._errorBarsPreferenceFromToolBar
         )
 
         scaling = dpiScalingFactor(self)
@@ -451,6 +466,12 @@ class AutoPlot(MPLPlotWidget):
             self.complexRepresentation = complexRepresentation
             self._plotData()
 
+    @Slot(bool)
+    def _errorBarsPreferenceFromToolBar(self, showErrorBars: bool) -> None:
+        if showErrorBars is not self.showErrorBars:
+            self.showErrorBars = showErrorBars
+            self._plotData()
+
     def _plotData(self) -> None:
         """Plot the data using previously determined data and plot types."""
 
@@ -474,7 +495,7 @@ class AutoPlot(MPLPlotWidget):
             indeps = self.data.axes()
             for dn in plottableDependents(self.data):
                 dvals = self.data.data_vals(dn)
-                yerr = errorBarData(self.data, dn)
+                yerr = errorBarData(self.data, dn) if self.showErrorBars else None
                 if yerr is not None:
                     kw['_errorBarData'] = yerr
                 else:
