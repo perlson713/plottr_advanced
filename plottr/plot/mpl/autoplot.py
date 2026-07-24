@@ -26,6 +26,127 @@ from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
 
 logger = logging.getLogger(__name__)
 
+
+#: accent / neutral colors shared by the autoplot GUI styling.
+_ACCENT = '#2563eb'
+_ACCENT_DARK = '#1d4ed8'
+_ACCENT_TINT = '#e8edfb'
+_ACCENT_TINT_BORDER = '#cdd9f7'
+
+#: stylesheet for the plot-options toolbar (segmented-control look).
+TOOLBAR_STYLESHEET = f"""
+QToolBar#autoPlotToolBar {{
+    background: #f5f6f8;
+    border: none;
+    border-bottom: 1px solid #e2e5ea;
+    padding: 4px 6px;
+    spacing: 3px;
+}}
+QToolBar#autoPlotToolBar QToolButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 10px;
+    color: #3a3f4b;
+    font-weight: 500;
+}}
+QToolBar#autoPlotToolBar QToolButton:hover {{
+    background: {_ACCENT_TINT};
+    border: 1px solid {_ACCENT_TINT_BORDER};
+}}
+QToolBar#autoPlotToolBar QToolButton:checked {{
+    background: {_ACCENT};
+    border: 1px solid {_ACCENT};
+    color: #ffffff;
+}}
+QToolBar#autoPlotToolBar QToolButton:checked:hover {{
+    background: {_ACCENT_DARK};
+}}
+QToolBar#autoPlotToolBar QToolButton:disabled {{
+    color: #b8bcc6;
+}}
+QToolBar#autoPlotToolBar::separator {{
+    background: #e2e5ea;
+    width: 1px;
+    margin: 5px 6px;
+}}
+QLabel#tbSection {{
+    color: #8b909c;
+    font-weight: 700;
+    padding: 0px 5px 0px 3px;
+}}
+QComboBox#complexCombo {{
+    background: #ffffff;
+    border: 1px solid #d4d8e0;
+    border-radius: 6px;
+    padding: 3px 8px;
+    min-width: 96px;
+    color: #3a3f4b;
+}}
+QComboBox#complexCombo:hover {{
+    border: 1px solid {_ACCENT_TINT_BORDER};
+}}
+QComboBox#complexCombo:focus {{
+    border: 1px solid {_ACCENT};
+}}
+QComboBox#complexCombo::drop-down {{
+    border: none;
+    width: 18px;
+}}
+"""
+
+#: stylesheet for the axes-options dialog.
+DIALOG_STYLESHEET = f"""
+QDialog#axesOptionsDialog {{
+    background: #ffffff;
+}}
+QDialog#axesOptionsDialog QGroupBox {{
+    font-weight: 600;
+    color: #3a3f4b;
+    border: 1px solid #e2e5ea;
+    border-radius: 8px;
+    margin-top: 12px;
+    padding: 10px 10px 8px 10px;
+}}
+QDialog#axesOptionsDialog QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0px 5px;
+    color: {_ACCENT};
+}}
+QDialog#axesOptionsDialog QLineEdit,
+QDialog#axesOptionsDialog QComboBox {{
+    border: 1px solid #d4d8e0;
+    border-radius: 6px;
+    padding: 3px 6px;
+    background: #ffffff;
+    selection-background-color: {_ACCENT};
+}}
+QDialog#axesOptionsDialog QLineEdit:focus,
+QDialog#axesOptionsDialog QComboBox:focus {{
+    border: 1px solid {_ACCENT};
+}}
+QDialog#axesOptionsDialog QPushButton {{
+    background: {_ACCENT};
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 18px;
+    font-weight: 600;
+}}
+QDialog#axesOptionsDialog QPushButton:hover {{
+    background: {_ACCENT_DARK};
+}}
+QDialog#axesOptionsDialog QPushButton:pressed {{
+    background: #1e40af;
+}}
+QDialog#axesOptionsDialog QCheckBox {{
+    spacing: 6px;
+}}
+"""
+
+
 class FigureMaker(BaseFM):
     """Matplotlib implementation for :class:`.AutoFigureMaker`.
     Implements plotting routines for data with 1 or 2 dependents, as well as generation
@@ -180,6 +301,11 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
         super().__init__(name, parent=parent)
 
+        self.setObjectName('autoPlotToolBar')
+        self.setStyleSheet(TOOLBAR_STYLESHEET)
+
+        self._addSectionLabel('Plot')
+
         self.plotasMultiTraces = self.addAction(get_multiTracePlotIcon(),
                                                 'Multiple traces')
         self.plotasMultiTraces.setCheckable(True)
@@ -214,33 +340,18 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
         # other options
         self.addSeparator()
+        self._addSectionLabel('Complex')
 
-        self.plotReal = self.addAction('Real')
-        self.plotReal.setCheckable(True)
-        self.plotReal.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.real))
-
-        self.plotReIm = self.addAction('Re/Im')
-        self.plotReIm.setCheckable(True)
-        self.plotReIm.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.realAndImag))
-
-        self.plotReImSep = self.addAction('Split Re/Im')
-        self.plotReImSep.setCheckable(True)
-        self.plotReImSep.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.realAndImagSeparate))
-
-        self.plotMagPhase = self.addAction('Mag/Phase')
-        self.plotMagPhase.setCheckable(True)
-        self.plotMagPhase.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.magAndPhase))
-
-        self.plotComplexPlane = self.addAction('Complex plane')
-        self.plotComplexPlane.setCheckable(True)
-        self.plotComplexPlane.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.complexPlane))
+        #: complex representation is chosen from a compact dropdown; the enum
+        #: member is stored as the item's user data.
+        self.complexCombo = QtWidgets.QComboBox()
+        self.complexCombo.setObjectName('complexCombo')
+        self.complexCombo.setToolTip('How to represent complex-valued data')
+        self.complexCombo.activated.connect(self._complexComboActivated)
+        self.addWidget(self.complexCombo)
 
         self.addSeparator()
+        self._addSectionLabel('Display')
 
         self.showErrorBars = self.addAction('Error bars')
         self.showErrorBars.setCheckable(True)
@@ -265,20 +376,36 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
             PlotType.scatter2d: self.plotasScatter2d,
         })
 
-        self.ComplexActions = OrderedDict({
-            ComplexRepresentation.real: self.plotReal,
-            ComplexRepresentation.realAndImag: self.plotReIm,
-            ComplexRepresentation.realAndImagSeparate: self.plotReImSep,
-            ComplexRepresentation.magAndPhase: self.plotMagPhase,
-            ComplexRepresentation.complexPlane: self.plotComplexPlane,
-        })
-
         self._currentPlotType = PlotType.empty
         self._currentlyAllowedPlotTypes: Tuple[PlotType, ...] = ()
 
         self._currentComplex = ComplexRepresentation.realAndImag
-        self.ComplexActions[self._currentComplex].setChecked(True)
         self._currentlyAllowedComplexTypes: Tuple[ComplexRepresentation, ...] = ()
+
+    #: short, compact labels for the complex-representation dropdown.
+    _complexLabels = OrderedDict([
+        (ComplexRepresentation.real, 'Real'),
+        (ComplexRepresentation.realAndImag, 'Re / Im'),
+        (ComplexRepresentation.realAndImagSeparate, 'Re / Im (split)'),
+        (ComplexRepresentation.magAndPhase, 'Mag / Phase'),
+        (ComplexRepresentation.log_MagAndPhase, 'logMag / Phase'),
+        (ComplexRepresentation.complexPlane, 'Complex plane'),
+    ])
+
+    def _complexLabel(self, comp: ComplexRepresentation) -> str:
+        return self._complexLabels.get(comp, str(comp.value))
+
+    @Slot(int)
+    def _complexComboActivated(self, index: int) -> None:
+        comp = self.complexCombo.itemData(index)
+        if comp is not None:
+            self.selectComplexType(comp)
+
+    def _addSectionLabel(self, text: str) -> None:
+        """Add a small, muted section header to the toolbar."""
+        label = QtWidgets.QLabel(text.upper())
+        label.setObjectName('tbSection')
+        self.addWidget(label)
 
     def selectPlotType(self, plotType: PlotType) -> None:
         """makes sure that the selected `plotType` is active (checked), all
@@ -334,50 +461,50 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
         self._currentlyAllowedPlotTypes = args
 
+    def _setComboToCurrent(self) -> None:
+        """Sync the dropdown to :attr:`_currentComplex` without emitting."""
+        index = self.complexCombo.findData(self._currentComplex)
+        if index >= 0:
+            self.complexCombo.blockSignals(True)
+            self.complexCombo.setCurrentIndex(index)
+            self.complexCombo.blockSignals(False)
+
     def selectComplexType(self, comp: ComplexRepresentation) -> None:
-        """makes sure that the selected `comp` is active (checked), all
-        others are not active.
-        This method should be used to catch a trigger from the UI.
-        If the active plot type has been changed by using this method,
-        we emit `complexPolarSelected`.
+        """makes sure that the selected `comp` is shown in the dropdown.
+
+        This method can be used to catch a trigger from the UI or to set the
+        selection programmatically. If the active complex representation
+        changed, we emit :attr:`complexRepresentationSelected`.
         """
-        # deselect all other types
-        for k, v in self.ComplexActions.items():
-            if k is not comp and v is not None:
-                v.setChecked(False)
-
-        # don't want un-toggling - can only be done by selecting another type
-        self.ComplexActions[comp].setChecked(True)
-
-        if comp is not self._currentComplex:
-            self._currentComplex = comp
+        changed = comp is not self._currentComplex
+        self._currentComplex = comp
+        self._setComboToCurrent()
+        if changed:
             self.complexRepresentationSelected.emit(self._currentComplex)
 
     def setAllowedComplexTypes(self, *complexOptions: ComplexRepresentation) -> None:
-        """Disable all complex representation choices that are not allowed.
-        If the current selection is now disabled, instead select the first
-        enabled one.
+        """Populate the dropdown with the allowed complex representations.
+
+        If the current selection is no longer allowed, select the first
+        allowed one instead (and emit the change).
         """
 
         if complexOptions == self._currentlyAllowedComplexTypes:
             return
 
-        for k, v in self.ComplexActions.items():
-            if k not in complexOptions:
-                v.setChecked(False)
-                v.setEnabled(False)
-            else:
-                v.setEnabled(True)
+        self.complexCombo.blockSignals(True)
+        self.complexCombo.clear()
+        for comp in complexOptions:
+            self.complexCombo.addItem(self._complexLabel(comp), comp)
+        self.complexCombo.blockSignals(False)
 
         if self._currentComplex not in complexOptions:
-            self._currentComplex = ComplexRepresentation.realAndImag
-            for k, v in self.ComplexActions.items():
-                if k in complexOptions:
-                    v.setChecked(True)
-                    self._currentComplex = k
-                    break
-
+            self._currentComplex = complexOptions[0] if complexOptions \
+                else ComplexRepresentation.realAndImag
+            self._setComboToCurrent()
             self.complexRepresentationSelected.emit(self._currentComplex)
+        else:
+            self._setComboToCurrent()
 
         self._currentlyAllowedComplexTypes = complexOptions
 
@@ -403,10 +530,10 @@ class AxesOptionsDialog(QtWidgets.QDialog):
     def __init__(self, options: AxesOptions,
                  parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent=parent)
+        self.setObjectName('axesOptionsDialog')
+        self.setStyleSheet(DIALOG_STYLESHEET)
         self.setWindowTitle('Axes options')
         self._updating = False
-
-        form = QtWidgets.QFormLayout()
 
         self.xscale = QtWidgets.QComboBox()
         self.xscale.addItems(['default'] + list(AXIS_SCALES))
@@ -426,14 +553,28 @@ class AxesOptionsDialog(QtWidgets.QDialog):
 
         self.equalAspect = QtWidgets.QCheckBox('equal (square) aspect ratio')
 
-        form.addRow('x scale', self.xscale)
-        form.addRow('x min', self.xmin)
-        form.addRow('x max', self.xmax)
-        form.addRow('y scale', self.yscale)
-        form.addRow('y min', self.ymin)
-        form.addRow('y max', self.ymax)
-        form.addRow('grid', self.grid)
-        form.addRow('aspect', self.equalAspect)
+        # X axis group
+        xForm = QtWidgets.QFormLayout()
+        xForm.addRow('scale', self.xscale)
+        xForm.addRow('min', self.xmin)
+        xForm.addRow('max', self.xmax)
+        xBox = QtWidgets.QGroupBox('X axis')
+        xBox.setLayout(xForm)
+
+        # Y axis group
+        yForm = QtWidgets.QFormLayout()
+        yForm.addRow('scale', self.yscale)
+        yForm.addRow('min', self.ymin)
+        yForm.addRow('max', self.ymax)
+        yBox = QtWidgets.QGroupBox('Y axis')
+        yBox.setLayout(yForm)
+
+        # Display group
+        dForm = QtWidgets.QFormLayout()
+        dForm.addRow('grid', self.grid)
+        dForm.addRow('aspect', self.equalAspect)
+        dBox = QtWidgets.QGroupBox('Display')
+        dBox.setLayout(dForm)
 
         self.resetButton = QtWidgets.QPushButton('Reset')
         self.resetButton.clicked.connect(self.resetOptions)
@@ -443,7 +584,10 @@ class AxesOptionsDialog(QtWidgets.QDialog):
         buttons.addWidget(self.resetButton)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.setSpacing(10)
+        layout.addWidget(xBox)
+        layout.addWidget(yBox)
+        layout.addWidget(dBox)
         layout.addLayout(buttons)
 
         self.setOptions(options)
