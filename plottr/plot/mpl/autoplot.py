@@ -12,12 +12,13 @@ from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from matplotlib.cm import ScalarMappable
 
-from plottr import QtWidgets, QtCore, Signal, Slot
+from plottr import QtWidgets, QtCore, QtGui, Signal, Slot
 from plottr.data.datadict import DataDictBase
 from plottr.icons import (get_singleTracePlotIcon, get_multiTracePlotIcon, get_imagePlotIcon,
                           get_colormeshPlotIcon, get_scatterPlot2dIcon)
 from plottr.gui.tools import dpiScalingFactor
-from .plotting import PlotType, colorplot2d
+from .plotting import (PlotType, colorplot2d, square_axes, AxesOptions,
+                       apply_axes_options_to_figure, AXIS_SCALES)
 from .widgets import MPLPlotWidget
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, PlotWidgetContainer, \
@@ -101,6 +102,13 @@ class FigureMaker(BaseFM):
         if isinstance(axes, list) and len(axes) > 1:
             if len(labels) > 2 and len(set(labels[2])) == 1:
                 axes[1].set_ylabel(labels[2][0])
+
+        # complex-plane plots (Real vs Imag) default to a square plot range
+        # with equal aspect ratio, so that circles stay circular.
+        if self.complexRepresentation is ComplexRepresentation.complexPlane \
+                and isinstance(axes, list):
+            for ax in axes:
+                square_axes(ax)
         return None
 
     def plot(self, plotItem: PlotItem) -> Optional[Union[ScalarMappable, List[ScalarMappable]]]:
@@ -163,6 +171,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
     #: signal emitted when error-bar visibility has been changed
     errorBarsSelected = Signal(bool)
+
+    #: signal emitted when the user requests the axes-options dialog
+    axesOptionsRequested = Signal()
 
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
@@ -236,6 +247,15 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.showErrorBars.setChecked(True)
         self.showErrorBars.triggered.connect(
             lambda: self.errorBarsSelected.emit(self.showErrorBars.isChecked()))
+
+        self.addSeparator()
+
+        self.axesOptions = self.addAction('Axes options…')
+        self.axesOptions.setToolTip(
+            'Adjust axis scales, ranges, grid and aspect ratio '
+            '(kept across re-draws).')
+        self.axesOptions.triggered.connect(
+            lambda: self.axesOptionsRequested.emit())
 
         self.plotTypeActions = OrderedDict({
             PlotType.multitraces: self.plotasMultiTraces,
@@ -362,6 +382,134 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self._currentlyAllowedComplexTypes = complexOptions
 
 
+class AxesOptionsDialog(QtWidgets.QDialog):
+    """A small dialog to edit :class:`.AxesOptions` for an autoplot.
+
+    The dialog is modeless and emits :attr:`optionsChanged` whenever the user
+    changes a value, so the plot can update live. All fields are optional; an
+    empty limit field means "auto", and the ``default`` scale/grid entries
+    leave matplotlib's own behaviour untouched.
+    """
+
+    #: emitted (with the new options) whenever the user edits a value
+    optionsChanged = Signal(AxesOptions)
+
+    _gridChoices = OrderedDict([
+        ('default', None),
+        ('on', True),
+        ('off', False),
+    ])
+
+    def __init__(self, options: AxesOptions,
+                 parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent=parent)
+        self.setWindowTitle('Axes options')
+        self._updating = False
+
+        form = QtWidgets.QFormLayout()
+
+        self.xscale = QtWidgets.QComboBox()
+        self.xscale.addItems(['default'] + list(AXIS_SCALES))
+        self.yscale = QtWidgets.QComboBox()
+        self.yscale.addItems(['default'] + list(AXIS_SCALES))
+
+        self.xmin = QtWidgets.QLineEdit()
+        self.xmax = QtWidgets.QLineEdit()
+        self.ymin = QtWidgets.QLineEdit()
+        self.ymax = QtWidgets.QLineEdit()
+        for w in (self.xmin, self.xmax, self.ymin, self.ymax):
+            w.setPlaceholderText('auto')
+            w.setValidator(QtGui.QDoubleValidator(w))
+
+        self.grid = QtWidgets.QComboBox()
+        self.grid.addItems(list(self._gridChoices.keys()))
+
+        self.equalAspect = QtWidgets.QCheckBox('equal (square) aspect ratio')
+
+        form.addRow('x scale', self.xscale)
+        form.addRow('x min', self.xmin)
+        form.addRow('x max', self.xmax)
+        form.addRow('y scale', self.yscale)
+        form.addRow('y min', self.ymin)
+        form.addRow('y max', self.ymax)
+        form.addRow('grid', self.grid)
+        form.addRow('aspect', self.equalAspect)
+
+        self.resetButton = QtWidgets.QPushButton('Reset')
+        self.resetButton.clicked.connect(self.resetOptions)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.resetButton)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addLayout(buttons)
+
+        self.setOptions(options)
+
+        # connect after initial population to avoid spurious signals
+        self.xscale.currentIndexChanged.connect(self._emit)
+        self.yscale.currentIndexChanged.connect(self._emit)
+        self.grid.currentIndexChanged.connect(self._emit)
+        self.equalAspect.toggled.connect(self._emit)
+        for w in (self.xmin, self.xmax, self.ymin, self.ymax):
+            w.editingFinished.connect(self._emit)
+
+    @staticmethod
+    def _floatOrNone(text: str) -> Optional[float]:
+        text = text.strip()
+        if text == '':
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _scaleOrNone(text: str) -> Optional[str]:
+        return None if text == 'default' else text
+
+    def currentOptions(self) -> AxesOptions:
+        """Build an :class:`.AxesOptions` from the current widget state."""
+        return AxesOptions(
+            xscale=self._scaleOrNone(self.xscale.currentText()),
+            yscale=self._scaleOrNone(self.yscale.currentText()),
+            xmin=self._floatOrNone(self.xmin.text()),
+            xmax=self._floatOrNone(self.xmax.text()),
+            ymin=self._floatOrNone(self.ymin.text()),
+            ymax=self._floatOrNone(self.ymax.text()),
+            grid=self._gridChoices[self.grid.currentText()],
+            equalAspect=self.equalAspect.isChecked(),
+        )
+
+    def setOptions(self, options: AxesOptions) -> None:
+        """Populate the widgets from an :class:`.AxesOptions` instance."""
+        self._updating = True
+        self.xscale.setCurrentText(options.xscale or 'default')
+        self.yscale.setCurrentText(options.yscale or 'default')
+        self.xmin.setText('' if options.xmin is None else repr(options.xmin))
+        self.xmax.setText('' if options.xmax is None else repr(options.xmax))
+        self.ymin.setText('' if options.ymin is None else repr(options.ymin))
+        self.ymax.setText('' if options.ymax is None else repr(options.ymax))
+        grid_label = next(k for k, v in self._gridChoices.items()
+                          if v is options.grid)
+        self.grid.setCurrentText(grid_label)
+        self.equalAspect.setChecked(options.equalAspect)
+        self._updating = False
+
+    @Slot()
+    def resetOptions(self) -> None:
+        """Reset all fields to their neutral (do-nothing) values."""
+        self.setOptions(AxesOptions())
+        self._emit()
+
+    @Slot()
+    def _emit(self) -> None:
+        if not self._updating:
+            self.optionsChanged.emit(self.currentOptions())
+
+
 class AutoPlot(MPLPlotWidget):
     """A widget for plotting with matplotlib.
 
@@ -382,6 +530,10 @@ class AutoPlot(MPLPlotWidget):
         self.complexRepresentation = ComplexRepresentation.realAndImag
         self.showErrorBars = True
 
+        # User-adjustable matplotlib axes options (persist across re-draws).
+        self.axesOptions = AxesOptions()
+        self._axesOptionsDialog: Optional[AxesOptionsDialog] = None
+
         # A toolbar for configuring the plot
         self.plotOptionsToolBar = AutoPlotToolBar('Plot options', self)
         layout = cast(QtWidgets.QVBoxLayout, self.layout())
@@ -395,6 +547,9 @@ class AutoPlot(MPLPlotWidget):
         )
         self.plotOptionsToolBar.errorBarsSelected.connect(
             self._errorBarsPreferenceFromToolBar
+        )
+        self.plotOptionsToolBar.axesOptionsRequested.connect(
+            self._showAxesOptionsDialog
         )
 
         scaling = dpiScalingFactor(self)
@@ -472,6 +627,24 @@ class AutoPlot(MPLPlotWidget):
             self.showErrorBars = showErrorBars
             self._plotData()
 
+    @Slot()
+    def _showAxesOptionsDialog(self) -> None:
+        """Open (or raise) the modeless axes-options dialog."""
+        if self._axesOptionsDialog is None:
+            self._axesOptionsDialog = AxesOptionsDialog(self.axesOptions, self)
+            self._axesOptionsDialog.optionsChanged.connect(
+                self._axesOptionsChanged)
+        else:
+            self._axesOptionsDialog.setOptions(self.axesOptions)
+        self._axesOptionsDialog.show()
+        self._axesOptionsDialog.raise_()
+        self._axesOptionsDialog.activateWindow()
+
+    @Slot(AxesOptions)
+    def _axesOptionsChanged(self, options: AxesOptions) -> None:
+        self.axesOptions = options
+        self._plotData()
+
     def _plotData(self) -> None:
         """Plot the data using previously determined data and plot types."""
 
@@ -505,6 +678,9 @@ class AutoPlot(MPLPlotWidget):
                     labels=[str(self.data.label(n)) for n in indeps] + [str(self.data.label(dn))],
                     plotDataType=self.plotDataType,
                     **kw)
+
+        # re-apply user axes options so they survive automatic re-drawing.
+        apply_axes_options_to_figure(self.plot.fig, self.axesOptions)
 
         self.setMeta(self.data)
         self.updatePlot()

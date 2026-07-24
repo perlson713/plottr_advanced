@@ -1,6 +1,14 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from plottr.plot.mpl.plotting import PlotType, colorplot2d
+from plottr.plot.mpl.plotting import (
+    PlotType,
+    colorplot2d,
+    AxesOptions,
+    square_axes,
+    apply_axes_options,
+    apply_axes_options_to_figure,
+    data_axes,
+)
 from plottr.data.datadict import DataDict
 from plottr.plot.base import (
     AutoFigureMaker,
@@ -84,3 +92,102 @@ def test_complex_plane_representation_splits_to_real_vs_imag():
     assert np.allclose(items[0].data[0], [1, 3, 5])
     assert np.allclose(items[0].data[1], [2, 4, 6])
     assert items[0].labels == ['Real(signal)', 'Imag(signal)']
+
+
+def test_square_axes_makes_range_square_and_equal_aspect():
+    fig, ax = plt.subplots()
+    ax.plot([0, 10], [0, 1])  # very wide range in x, narrow in y
+    square_axes(ax)
+
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    # spans are equal
+    assert np.isclose(x1 - x0, y1 - y0)
+    # aspect is equal (data coords are square)
+    assert ax.get_aspect() == 1.0
+    plt.close(fig)
+
+
+def test_square_axes_handles_degenerate_range():
+    fig, ax = plt.subplots()
+    ax.plot([5], [5])
+    ax.set_xlim(5, 5)
+    ax.set_ylim(5, 5)
+    square_axes(ax)
+    x0, x1 = ax.get_xlim()
+    assert x1 > x0  # no zero-width axes
+    plt.close(fig)
+
+
+def test_axes_options_default_is_noop():
+    options = AxesOptions()
+    assert options.isDefault()
+
+    fig, ax = plt.subplots()
+    ax.set_xscale('log')  # some pre-existing state
+    apply_axes_options(ax, options)
+    assert ax.get_xscale() == 'log'  # untouched
+    plt.close(fig)
+
+
+def test_axes_options_apply_scale_grid_aspect_and_limits():
+    options = AxesOptions(
+        xscale='log', yscale='linear',
+        xmin=1.0, xmax=100.0, ymin=-2.0, ymax=2.0,
+        grid=True, equalAspect=True,
+    )
+    assert not options.isDefault()
+
+    fig, ax = plt.subplots()
+    ax.plot([1, 10, 100], [0, 1, 2])
+    apply_axes_options(ax, options)
+
+    assert ax.get_xscale() == 'log'
+    assert ax.get_yscale() == 'linear'
+    assert np.allclose(ax.get_xlim(), (1.0, 100.0))
+    assert np.allclose(ax.get_ylim(), (-2.0, 2.0))
+    assert ax.get_aspect() == 1.0
+    plt.close(fig)
+
+
+def test_axes_options_partial_limit_keeps_other_bound():
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.set_xlim(0.0, 1.0)
+    apply_axes_options(ax, AxesOptions(xmax=5.0))
+    x0, x1 = ax.get_xlim()
+    assert np.isclose(x0, 0.0)  # lower bound preserved
+    assert np.isclose(x1, 5.0)  # upper bound applied
+    plt.close(fig)
+
+
+def test_apply_axes_options_to_figure_skips_colorbar():
+    fig, ax = plt.subplots()
+    im = ax.imshow(np.random.rand(4, 4))
+    fig.colorbar(im, ax=ax)
+
+    assert len(data_axes(fig)) == 1  # colorbar excluded
+
+    apply_axes_options_to_figure(fig, AxesOptions(grid=True, equalAspect=True))
+    assert ax.get_aspect() == 1.0
+    plt.close(fig)
+
+
+def test_complex_plane_figuremaker_produces_square_axes():
+    from plottr.plot.mpl.autoplot import FigureMaker
+
+    fig = plt.figure()
+    with FigureMaker(fig) as fm:
+        fm.plotType = PlotType.singletraces
+        fm.complexRepresentation = ComplexRepresentation.complexPlane
+        x = np.linspace(0, 1, 50)
+        z = np.exp(2j * np.pi * x)  # unit circle in the complex plane
+        fm.addData(x, z, labels=['x', 'signal'],
+                   plotDataType=PlotDataType.line1d)
+
+    ax = fig.axes[0]
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    assert np.isclose(x1 - x0, y1 - y0)
+    assert ax.get_aspect() == 1.0
+    plt.close(fig)

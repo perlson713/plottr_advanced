@@ -2,12 +2,14 @@
 ``plottr.plot.mpl.plotting`` -- Plotting tools (mostly used in Autoplot)
 """
 
+from dataclasses import dataclass
 from enum import Enum, auto, unique
-from typing import Any, Optional, Tuple, Union, cast
+from typing import Any, List, Optional, Tuple, Union, cast
 
 import numpy as np
 from matplotlib import colors, rcParams
 from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.cm import ScalarMappable
 
@@ -211,3 +213,120 @@ def plotImage(ax: Axes, x: np.ndarray, y: np.ndarray,
     im = ax.imshow(z.T, aspect='auto', origin='lower',
                    extent=extent, **kw)
     return im
+
+
+# Axis/display helpers -------------------------------------------------------
+
+#: matplotlib axis scales we expose in the GUI.
+AXIS_SCALES: Tuple[str, ...] = ('linear', 'log', 'symlog')
+
+
+def square_axes(ax: Axes) -> None:
+    """Give an axes a square plot range with equal aspect ratio.
+
+    The current x and y ranges are replaced by a single, common range
+    (the larger of the two spans, centered on the data), and the aspect
+    ratio is set to ``'equal'``. This makes, e.g., a circle in the complex
+    plane appear as a circle rather than an ellipse.
+
+    :param ax: the axes to modify.
+    """
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    xc = 0.5 * (x0 + x1)
+    yc = 0.5 * (y0 + y1)
+    half = 0.5 * max(abs(x1 - x0), abs(y1 - y0))
+    if half == 0 or not np.isfinite(half):
+        half = 1.0
+    ax.set_xlim(xc - half, xc + half)
+    ax.set_ylim(yc - half, yc + half)
+    ax.set_aspect('equal', adjustable='box')
+
+
+def data_axes(fig: Figure) -> List[Axes]:
+    """Return the "data" axes of a figure, i.e. everything except colorbars.
+
+    :param fig: the figure to inspect.
+    :return: list of axes that hold plotted data.
+    """
+    return [ax for ax in fig.axes if ax.get_label() != '<colorbar>']
+
+
+@dataclass
+class AxesOptions:
+    """User-adjustable matplotlib axes properties.
+
+    Any attribute left at its "unset" value (``None`` for most, ``False`` for
+    :attr:`equalAspect`) leaves the corresponding matplotlib default/automatic
+    behaviour untouched. Instances are meant to be re-applied to freshly drawn
+    axes so that user choices survive plottr's automatic re-drawing.
+    """
+
+    #: x-axis scale, one of :data:`AXIS_SCALES`; ``None`` leaves it as-is.
+    xscale: Optional[str] = None
+    #: y-axis scale, one of :data:`AXIS_SCALES`; ``None`` leaves it as-is.
+    yscale: Optional[str] = None
+    #: lower x limit; ``None`` means auto-scale.
+    xmin: Optional[float] = None
+    #: upper x limit; ``None`` means auto-scale.
+    xmax: Optional[float] = None
+    #: lower y limit; ``None`` means auto-scale.
+    ymin: Optional[float] = None
+    #: upper y limit; ``None`` means auto-scale.
+    ymax: Optional[float] = None
+    #: whether to draw the grid; ``None`` leaves the rcParams default.
+    grid: Optional[bool] = None
+    #: whether to force an equal (square) aspect ratio.
+    equalAspect: bool = False
+
+    def isDefault(self) -> bool:
+        """Whether all options are at their neutral (do-nothing) value."""
+        return (
+            self.xscale is None and self.yscale is None
+            and self.xmin is None and self.xmax is None
+            and self.ymin is None and self.ymax is None
+            and self.grid is None and not self.equalAspect
+        )
+
+
+def apply_axes_options(ax: Axes, options: AxesOptions) -> None:
+    """Apply :class:`AxesOptions` to a single matplotlib axes.
+
+    Only options that differ from their neutral value have an effect, so this
+    can be called on any axes without clobbering settings the user did not
+    explicitly request.
+
+    :param ax: the axes to modify.
+    :param options: the options to apply.
+    """
+    if options.xscale is not None:
+        ax.set_xscale(options.xscale)
+    if options.yscale is not None:
+        ax.set_yscale(options.yscale)
+
+    if options.grid is not None:
+        ax.grid(options.grid)
+
+    if options.equalAspect:
+        ax.set_aspect('equal', adjustable='box')
+
+    # limits are applied last so that they win over any autoscaling triggered
+    # by the settings above. A value of None keeps the current (auto) limit.
+    if options.xmin is not None or options.xmax is not None:
+        ax.set_xlim(left=options.xmin, right=options.xmax)
+    if options.ymin is not None or options.ymax is not None:
+        ax.set_ylim(bottom=options.ymin, top=options.ymax)
+
+
+def apply_axes_options_to_figure(fig: Figure, options: AxesOptions) -> None:
+    """Apply :class:`AxesOptions` to all data axes of a figure.
+
+    Colorbar axes are left untouched.
+
+    :param fig: the figure whose data axes should be modified.
+    :param options: the options to apply.
+    """
+    if options.isDefault():
+        return
+    for ax in data_axes(fig):
+        apply_axes_options(ax, options)
