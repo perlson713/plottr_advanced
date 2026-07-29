@@ -22,7 +22,7 @@ from .plotting import (PlotType, colorplot2d, square_axes, AxesOptions,
 from .widgets import MPLPlotWidget
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, PlotWidgetContainer, \
-    errorBarData, plottableDependents
+    errorBarData, plottableDependents, ERROR_BAR_KEY, ERROR_BAR_X_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -254,10 +254,13 @@ class FigureMaker(BaseFM):
         x, y = plotItem.data
         assert plotItem.plotOptions is not None
         plotOptions = plotItem.plotOptions.copy()
-        yerr = plotOptions.pop('_errorBarData', None)
+        # both keys must be popped: anything left over is splatted into
+        # Axes.plot, which rejects unknown kwargs.
+        yerr = plotOptions.pop(ERROR_BAR_KEY, None)
+        xerr = plotOptions.pop(ERROR_BAR_X_KEY, None)
         line = axes[0].plot(x, y, label=lbl, **plotOptions)
-        if yerr is not None:
-            axes[0].errorbar(x, y, yerr=yerr, fmt='none',
+        if yerr is not None or xerr is not None:
+            axes[0].errorbar(x, y, yerr=yerr, xerr=xerr, fmt='none',
                              ecolor=line[0].get_color(), capsize=2)
         return line
 
@@ -295,6 +298,12 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
     #: signal emitted when the user requests the axes-options dialog
     axesOptionsRequested = Signal()
+
+    #: signal emitted when the phase unit (degrees vs radians) has changed
+    phaseDegreesSelected = Signal(bool)
+
+    #: signal emitted when phase unwrapping has been toggled
+    phaseUnwrapSelected = Signal(bool)
 
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
@@ -350,6 +359,23 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.complexCombo.activated.connect(self._complexComboActivated)
         self.addWidget(self.complexCombo)
 
+        #: phase unit; only meaningful for representations that show a phase.
+        self.phaseCombo = QtWidgets.QComboBox()
+        # reuse the complexCombo styling rule
+        self.phaseCombo.setObjectName('complexCombo')
+        self.phaseCombo.setToolTip('Unit used for the phase panel')
+        self.phaseCombo.addItem('rad', False)
+        self.phaseCombo.addItem('deg', True)
+        self.phaseCombo.activated.connect(self._phaseComboActivated)
+        self.addWidget(self.phaseCombo)
+
+        self.unwrapPhase = self.addAction('Unwrap')
+        self.unwrapPhase.setCheckable(True)
+        self.unwrapPhase.setChecked(False)
+        self.unwrapPhase.setToolTip('Remove 2-pi jumps from the phase')
+        self.unwrapPhase.triggered.connect(
+            lambda: self.phaseUnwrapSelected.emit(self.unwrapPhase.isChecked()))
+
         self.addSeparator()
         self._addSectionLabel('Display')
 
@@ -381,6 +407,7 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
         self._currentComplex = ComplexRepresentation.realAndImag
         self._currentlyAllowedComplexTypes: Tuple[ComplexRepresentation, ...] = ()
+        self._updatePhaseControlsEnabled()
 
     #: short, compact labels for the complex-representation dropdown.
     _complexLabels = OrderedDict([
@@ -388,18 +415,36 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         (ComplexRepresentation.realAndImag, 'Re / Im'),
         (ComplexRepresentation.realAndImagSeparate, 'Re / Im (split)'),
         (ComplexRepresentation.magAndPhase, 'Mag / Phase'),
-        (ComplexRepresentation.log_MagAndPhase, 'logMag / Phase'),
+        (ComplexRepresentation.log_MagAndPhase, 'dB / Phase'),
         (ComplexRepresentation.complexPlane, 'Complex plane'),
     ])
 
     def _complexLabel(self, comp: ComplexRepresentation) -> str:
         return self._complexLabels.get(comp, str(comp.value))
 
+    #: representations that produce a phase panel (phase options apply to them)
+    _phaseRepresentations = (
+        ComplexRepresentation.magAndPhase,
+        ComplexRepresentation.log_MagAndPhase,
+    )
+
     @Slot(int)
     def _complexComboActivated(self, index: int) -> None:
         comp = self.complexCombo.itemData(index)
         if comp is not None:
             self.selectComplexType(comp)
+
+    @Slot(int)
+    def _phaseComboActivated(self, index: int) -> None:
+        degrees = self.phaseCombo.itemData(index)
+        if degrees is not None:
+            self.phaseDegreesSelected.emit(bool(degrees))
+
+    def _updatePhaseControlsEnabled(self) -> None:
+        """Grey out the phase controls unless a phase is actually shown."""
+        showsPhase = self._currentComplex in self._phaseRepresentations
+        self.phaseCombo.setEnabled(showsPhase)
+        self.unwrapPhase.setEnabled(showsPhase)
 
     def _addSectionLabel(self, text: str) -> None:
         """Add a small, muted section header to the toolbar."""
@@ -479,6 +524,7 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         changed = comp is not self._currentComplex
         self._currentComplex = comp
         self._setComboToCurrent()
+        self._updatePhaseControlsEnabled()
         if changed:
             self.complexRepresentationSelected.emit(self._currentComplex)
 
@@ -502,9 +548,11 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
             self._currentComplex = complexOptions[0] if complexOptions \
                 else ComplexRepresentation.realAndImag
             self._setComboToCurrent()
+            self._updatePhaseControlsEnabled()
             self.complexRepresentationSelected.emit(self._currentComplex)
         else:
             self._setComboToCurrent()
+            self._updatePhaseControlsEnabled()
 
         self._currentlyAllowedComplexTypes = complexOptions
 
@@ -674,6 +722,10 @@ class AutoPlot(MPLPlotWidget):
         self.complexRepresentation = ComplexRepresentation.realAndImag
         self.showErrorBars = True
 
+        # phase display options (only relevant for mag/phase representations)
+        self.phaseDegrees = False
+        self.phaseUnwrap = False
+
         # User-adjustable matplotlib axes options (persist across re-draws).
         self.axesOptions = AxesOptions()
         self._axesOptionsDialog: Optional[AxesOptionsDialog] = None
@@ -694,6 +746,12 @@ class AutoPlot(MPLPlotWidget):
         )
         self.plotOptionsToolBar.axesOptionsRequested.connect(
             self._showAxesOptionsDialog
+        )
+        self.plotOptionsToolBar.phaseDegreesSelected.connect(
+            self._phaseDegreesFromToolBar
+        )
+        self.plotOptionsToolBar.phaseUnwrapSelected.connect(
+            self._phaseUnwrapFromToolBar
         )
 
         scaling = dpiScalingFactor(self)
@@ -746,6 +804,7 @@ class AutoPlot(MPLPlotWidget):
                     ComplexRepresentation.realAndImag,
                     ComplexRepresentation.realAndImagSeparate,
                     ComplexRepresentation.magAndPhase,
+                    ComplexRepresentation.log_MagAndPhase,
                     ComplexRepresentation.complexPlane,
                 )
             else:
@@ -769,6 +828,18 @@ class AutoPlot(MPLPlotWidget):
     def _errorBarsPreferenceFromToolBar(self, showErrorBars: bool) -> None:
         if showErrorBars is not self.showErrorBars:
             self.showErrorBars = showErrorBars
+            self._plotData()
+
+    @Slot(bool)
+    def _phaseDegreesFromToolBar(self, degrees: bool) -> None:
+        if degrees is not self.phaseDegrees:
+            self.phaseDegrees = degrees
+            self._plotData()
+
+    @Slot(bool)
+    def _phaseUnwrapFromToolBar(self, unwrap: bool) -> None:
+        if unwrap is not self.phaseUnwrap:
+            self.phaseUnwrap = unwrap
             self._plotData()
 
     @Slot()
@@ -808,15 +879,17 @@ class AutoPlot(MPLPlotWidget):
                 fm.complexRepresentation = ComplexRepresentation.real
             else:
                 fm.complexRepresentation = self.complexRepresentation
+            fm.phaseDegrees = self.phaseDegrees
+            fm.phaseUnwrap = self.phaseUnwrap
 
             indeps = self.data.axes()
             for dn in plottableDependents(self.data):
                 dvals = self.data.data_vals(dn)
                 yerr = errorBarData(self.data, dn) if self.showErrorBars else None
                 if yerr is not None:
-                    kw['_errorBarData'] = yerr
+                    kw[ERROR_BAR_KEY] = yerr
                 else:
-                    kw.pop('_errorBarData', None)
+                    kw.pop(ERROR_BAR_KEY, None)
                 plotId = fm.addData(
                     *[np.asanyarray(self.data.data_vals(n)) for n in indeps] + [dvals],
                     labels=[str(self.data.label(n)) for n in indeps] + [str(self.data.label(dn))],

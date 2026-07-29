@@ -14,7 +14,9 @@ from typing import Dict, List, Type, Tuple, Optional, Any, \
 import numpy as np
 
 from .. import Signal, Flowchart, QtWidgets
-from ..data.datadict import DataDictBase, DataDict, MeshgridDataDict
+from ..data.datadict import (DataDictBase, DataDict, MeshgridDataDict,
+                             ERROR_BAR_META_KEYS, errorBarDataName,
+                             errorBarData, plottableDependents)
 from ..node import Node, linearFlowchart
 from ..utils import LabeledOptions
 
@@ -248,10 +250,13 @@ class PlotDataType(Enum):
     #: grid data with 2 dependents
     grid2d = auto()
 
-    #: logarithmic scatter-type data with 1 dependent (data is not on a grid)
+    #: logarithmic scatter-type data with 1 dependent (data is not on a grid).
+    #: legacy: no longer implies a transform -- dB conversion happens once, in
+    #: :meth:`AutoFigureMaker._splitComplexData`. Plotted like ``scatter1d``.
     log10_scatter1d = auto()
 
-    #: logarithmic line data with 1 dependent (data is on a grid)
+    #: logarithmic line data with 1 dependent (data is on a grid).
+    #: legacy: see :attr:`log10_scatter1d`. Plotted like ``line1d``.
     log10_line1d = auto()
 
 
@@ -270,62 +275,90 @@ class ComplexRepresentation(LabeledOptions):
     #: magnitude and phase
     magAndPhase = "Mag/Phase"
 
-    #: Natural Logarithmic magnitude and phase
+    #: magnitude in dB (20*log10) and phase
     log_MagAndPhase = "logMag/Phase"
 
     #: real vs imaginary in the complex plane
     complexPlane = "Complex plane"
 
 
-ERROR_BAR_META_KEYS = ('errorbar', 'error_bar', 'yerr', 'y_error', 'error')
+#: key under which y error-bar data is passed through ``PlotItem.plotOptions``.
+ERROR_BAR_KEY = '_errorBarData'
+
+#: key under which x error-bar data is passed through ``PlotItem.plotOptions``.
+#: only used for representations where the x axis is a measured quantity
+#: (i.e. the complex plane).
+ERROR_BAR_X_KEY = '_errorBarDataX'
+
+#: conversion factor from a relative amplitude error to a dB error:
+#: d(20*log10(m)) = 20/ln(10) * dm/m
+DB_PER_NEPER = 20.0 / np.log(10.0)
 
 
-def errorBarDataName(data: DataDictBase, dependent: str) -> Optional[str]:
-    """Return the field containing y error bars for a dependent, if present."""
-    if dependent not in data:
-        return None
+def magnitude(data: np.ndarray) -> np.ndarray:
+    """Magnitude of (possibly masked) complex data.
 
-    for meta_name in ERROR_BAR_META_KEYS:
-        meta_key = data._meta_name_to_key(meta_name)
-        candidate = data[dependent].get(meta_key, None)
-        if isinstance(candidate, str) and candidate in data:
-            return candidate
-
-    candidates = (
-        f'{dependent}_err',
-        f'{dependent}_error',
-        f'{dependent}_yerr',
-        f'err_{dependent}',
-        f'error_{dependent}',
-    )
-    for candidate in candidates:
-        if candidate in data:
-            return candidate
-    return None
+    The explicit ``np.ma`` branch avoids a numpy ComplexWarning that would
+    otherwise be raised for masked arrays (which is what we almost always have).
+    """
+    if isinstance(data, np.ma.MaskedArray):
+        return np.ma.abs(data).real
+    return np.abs(data)
 
 
-def errorBarData(data: DataDictBase, dependent: str) -> Optional[np.ndarray]:
-    """Return y error-bar values associated with a dependent, if present."""
-    error_name = errorBarDataName(data, dependent)
-    if error_name is None:
-        return None
+def toDecibel(data: np.ndarray) -> np.ndarray:
+    """Convert complex or magnitude data to dB (``20*log10(|data|)``).
 
-    error_values = np.asanyarray(data.data_vals(error_name))
-    dependent_values = np.asanyarray(data.data_vals(dependent))
-    if error_values.shape != dependent_values.shape:
-        return None
-    return error_values
+    Non-positive magnitudes have no dB value; they are masked out rather than
+    turned into ``-inf``, so they are simply not drawn.
+
+    :param data: complex (or real) input data.
+    :return: masked array of dB values.
+    """
+    mag = magnitude(data)
+    invalid = ~(np.asarray(mag) > 0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        db = 20.0 * np.log10(np.where(invalid, 1.0, mag))
+    return np.ma.masked_array(db, mask=invalid)
 
 
-def plottableDependents(data: DataDictBase) -> List[str]:
-    """Return dependents excluding fields referenced as error bars."""
-    error_names = set()
-    dependents = data.dependents()
-    for dependent in dependents:
-        error_name = errorBarDataName(data, dependent)
-        if error_name is not None:
-            error_names.add(error_name)
-    return [dependent for dependent in dependents if dependent not in error_names]
+def phase(data: np.ndarray, unwrap: bool = False,
+          degrees: bool = False) -> np.ndarray:
+    """Phase of complex data, optionally unwrapped and/or in degrees.
+
+    :param data: complex input data.
+    :param unwrap: whether to remove 2-pi jumps.
+    :param degrees: whether to return degrees instead of radians.
+    :return: phase values.
+    """
+    ret = np.angle(data)
+    if unwrap:
+        ret = np.unwrap(ret)
+    if degrees:
+        ret = np.degrees(ret)
+    return ret
+
+
+def phaseUnitLabel(degrees: bool = False) -> str:
+    """Unit string to append to a phase axis label."""
+    return 'deg' if degrees else 'rad'
+
+
+def relativeError(error: np.ndarray, data: np.ndarray) -> np.ndarray:
+    """Relative error ``error/|data|``, guarding against division by zero.
+
+    Points where the magnitude vanishes have an undefined relative error and
+    are masked out.
+
+    :param error: absolute (isotropic) uncertainty of the complex data.
+    :param data: the complex data the error belongs to.
+    :return: masked array of relative errors.
+    """
+    mag = np.asarray(magnitude(data))
+    invalid = ~(mag > 0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rel = np.asarray(error) / np.where(invalid, 1.0, mag)
+    return np.ma.masked_array(rel, mask=invalid)
 
 
 def determinePlotDataType(data: Optional[DataDictBase]) -> PlotDataType:
@@ -452,6 +485,14 @@ class AutoFigureMaker:
         #: whether to combine 1D traces into one plot
         self.combineTraces: bool = False
 
+        #: whether to unwrap phase data (only for representations showing phase).
+        #: must be set before adding data to have an effect.
+        self.phaseUnwrap: bool = False
+
+        #: whether to show phase in degrees instead of radians.
+        #: must be set before adding data to have an effect.
+        self.phaseDegrees: bool = False
+
     def __enter__(self) -> "AutoFigureMaker":
         return self
 
@@ -479,6 +520,33 @@ class AutoFigureMaker:
         self.formatSubPlot(id)
         return None
 
+    def _phaseData(self, data: np.ndarray) -> np.ndarray:
+        """Phase of complex data, honouring the unwrap/degrees settings."""
+        return phase(data, unwrap=self.phaseUnwrap, degrees=self.phaseDegrees)
+
+    def _phaseUnitLabel(self) -> str:
+        """Unit string for the phase axis, honouring the degrees setting."""
+        return phaseUnitLabel(self.phaseDegrees)
+
+    def _phaseErrorFactor(self) -> float:
+        """Factor converting a relative amplitude error into a phase error."""
+        return 180.0 / np.pi if self.phaseDegrees else 1.0
+
+    @staticmethod
+    def _setError(plotItem: PlotItem, error: Optional[np.ndarray],
+                  key: str = ERROR_BAR_KEY) -> None:
+        """Attach transformed error-bar data to a plot item.
+
+        Does nothing when ``error`` is ``None``, so that items without error
+        bars never gain the private key (the backends splat ``plotOptions``
+        into their plot calls).
+        """
+        if error is None:
+            return
+        if plotItem.plotOptions is None:
+            plotItem.plotOptions = {}
+        plotItem.plotOptions[key] = error
+
     def _splitComplexData(self, plotItem: PlotItem) -> List[PlotItem]:
         if plotItem.labels is None:
             plotItem.labels = [''] * len(plotItem.data)
@@ -487,7 +555,22 @@ class AutoFigureMaker:
         if not np.issubdtype(plotItem.data[-1].dtype, np.complexfloating):
             return [plotItem]
 
-        elif self.complexRepresentation is ComplexRepresentation.complexPlane:
+        # error bars are supplied for the complex quantity as a whole; we treat
+        # them as an isotropic 1-sigma uncertainty and propagate them into
+        # whatever representation is chosen below. Magnitude must be taken
+        # before data[-1] gets overwritten.
+        if plotItem.plotOptions is None:
+            plotItem.plotOptions = {}
+        sigma = plotItem.plotOptions.get(ERROR_BAR_KEY, None)
+        mag = magnitude(plotItem.data[-1])
+        phaseErr = None
+        dbErr = None
+        if sigma is not None:
+            relErr = relativeError(sigma, plotItem.data[-1])
+            phaseErr = relErr * self._phaseErrorFactor()
+            dbErr = DB_PER_NEPER * relErr
+
+        if self.complexRepresentation is ComplexRepresentation.complexPlane:
             data = plotItem.data[-1]
 
             re_data = data.real
@@ -501,6 +584,10 @@ class AutoFigureMaker:
             plotItem.data = [re_data, im_data]
             plotItem.plotDataType = PlotDataType.scatter1d
             plotItem.labels = [re_label, im_label]
+            # an isotropic uncertainty is radial in the complex plane, so it
+            # applies to both axes -- not just the vertical one.
+            self._setError(plotItem, sigma, ERROR_BAR_X_KEY)
+            self._setError(plotItem, sigma, ERROR_BAR_KEY)
             return [plotItem]
 
         elif self.complexRepresentation is ComplexRepresentation.real:
@@ -534,6 +621,13 @@ class AutoFigureMaker:
                     or len(plotItem.data) > 2:
                 im_plotItem.subPlot = re_plotItem.subPlot + 1
 
+            # under the isotropic model both components carry the full sigma.
+            # set explicitly (after the deepcopy) so the two halves never share
+            # one array.
+            if sigma is not None:
+                self._setError(re_plotItem, np.array(sigma, copy=True))
+                self._setError(im_plotItem, np.array(sigma, copy=True))
+
             # this is a bit of a silly check (see top of the function -- should certainly be True!).
             # but it keeps mypy happy.
             assert isinstance(re_plotItem.labels, list)
@@ -546,14 +640,14 @@ class AutoFigureMaker:
         elif self.complexRepresentation == ComplexRepresentation.log_MagAndPhase:
             data = plotItem.data[-1]
 
-            # this check avoids a numpy ComplexWarning when we're working with MaskedArray (almost always)
-            mag_data = np.ma.abs(data).real if isinstance(data, np.ma.MaskedArray) else np.abs(data)
-            phase_data = np.angle(data)
+            mag_data = toDecibel(data)
+            phase_data = self._phaseData(data)
+            unit = self._phaseUnitLabel()
 
             if label == '':
-                mag_label, phase_label = '20*log10(Mag)', 'Phase'
+                mag_label, phase_label = 'Magnitude (dB)', f'Phase ({unit})'
             else:
-                mag_label, phase_label = label + ' 20*log10(Mag)', label + ' (Phase)'
+                mag_label, phase_label = f'{label} (dB)', f'{label} (Phase, {unit})'
 
             mag_plotItem = plotItem
             phase_plotItem = deepcopy(mag_plotItem)
@@ -562,6 +656,11 @@ class AutoFigureMaker:
             phase_plotItem.data[-1] = phase_data
             phase_plotItem.id = mag_plotItem.id + 1
             phase_plotItem.subPlot = mag_plotItem.subPlot + 1
+
+            # errors must be set after the deepcopy so both halves get their
+            # own, correctly transformed array.
+            self._setError(mag_plotItem, dbErr)
+            self._setError(phase_plotItem, phaseErr)
 
             # this is a bit of a silly check (see top of the function -- should certainly be True!).
             # but it keeps mypy happy.
@@ -575,14 +674,14 @@ class AutoFigureMaker:
         else:  # means that self.complexRepresentation is ComplexRepresentation.magAndPhase:
             data = plotItem.data[-1]
 
-            # this check avoids a numpy ComplexWarning when we're working with MaskedArray (almost always)
-            mag_data = np.ma.abs(data).real if isinstance(data, np.ma.MaskedArray) else np.abs(data)
-            phase_data = np.angle(data)
+            mag_data = mag
+            phase_data = self._phaseData(data)
+            unit = self._phaseUnitLabel()
 
             if label == '':
-                mag_label, phase_label = 'Mag', 'Phase'
+                mag_label, phase_label = 'Mag', f'Phase ({unit})'
             else:
-                mag_label, phase_label = label + ' (Mag)', label + ' (Phase)'
+                mag_label, phase_label = label + ' (Mag)', f'{label} (Phase, {unit})'
 
             mag_plotItem = plotItem
             phase_plotItem = deepcopy(mag_plotItem)
@@ -591,6 +690,10 @@ class AutoFigureMaker:
             phase_plotItem.data[-1] = phase_data
             phase_plotItem.id = mag_plotItem.id + 1
             phase_plotItem.subPlot = mag_plotItem.subPlot + 1
+
+            # the magnitude keeps sigma as-is; the phase error is sigma/|z|.
+            self._setError(mag_plotItem, sigma)
+            self._setError(phase_plotItem, phaseErr)
 
             # this is a bit of a silly check (see top of the function -- should certainly be True!).
             # but it keeps mypy happy.

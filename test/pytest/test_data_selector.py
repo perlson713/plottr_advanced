@@ -83,3 +83,99 @@ def test_incompatible_sets(qtbot):
 
     node.selectedData = data.dependents()[1]
     assert fc.output()['dataOut'].dependents() == [data.dependents()[1]]
+
+
+def _errorBarDataDict(errorFieldName='signal_std', useMeta=True,
+                      errorAxes=None):
+    """Build a DataDict with a dependent that has an error-bar column."""
+    from plottr.data.datadict import DataDict
+
+    x = np.arange(5.0)
+    fields = dict(
+        x=dict(values=x),
+        signal=dict(values=np.linspace(0, 1, 5), axes=['x']),
+    )
+    if errorAxes is None:
+        errorAxes = ['x']
+        errorValues = np.full(5, 0.1)
+    else:
+        # incompatible: lives on a different axis
+        fields['y'] = dict(values=np.arange(5.0))
+        errorValues = np.full(5, 0.1)
+    fields[errorFieldName] = dict(values=errorValues, axes=errorAxes)
+
+    data = DataDict(**fields)
+    if useMeta:
+        data.add_meta('errorbar', errorFieldName, data='signal')
+    assert data.validate()
+    return data
+
+
+def test_data_selector_keeps_meta_error_column(qtbot):
+    """Selecting only the dependent must not discard its error-bar column."""
+    from plottr.data.datadict import errorBarDataName, plottableDependents
+
+    DataSelector.useUi = False
+    data = _errorBarDataDict()
+
+    fc = linearFlowchart(('selector', DataSelector))
+    node = fc.nodes()['selector']
+    fc.setInput(dataIn=data)
+    node.selectedData = ['signal']
+    out = fc.output()['dataOut']
+
+    assert 'signal_std' in out
+    assert errorBarDataName(out, 'signal') == 'signal_std'
+    assert plottableDependents(out) == ['signal']
+    # the user's selection itself must be left alone
+    assert node.selectedData == ['signal']
+
+
+def test_data_selector_keeps_name_convention_error_column(qtbot):
+    """The naming-convention fallback (signal_err) must work too."""
+    from plottr.data.datadict import errorBarDataName
+
+    DataSelector.useUi = False
+    data = _errorBarDataDict(errorFieldName='signal_err', useMeta=False)
+
+    fc = linearFlowchart(('selector', DataSelector))
+    node = fc.nodes()['selector']
+    fc.setInput(dataIn=data)
+    node.selectedData = ['signal']
+    out = fc.output()['dataOut']
+
+    assert errorBarDataName(out, 'signal') == 'signal_err'
+
+
+def test_data_selector_skips_incompatible_error_column(qtbot):
+    """An error field on different axes must not be dragged in."""
+    DataSelector.useUi = False
+    data = _errorBarDataDict(errorAxes=['y'])
+
+    fc = linearFlowchart(('selector', DataSelector))
+    node = fc.nodes()['selector']
+    fc.setInput(dataIn=data)
+    node.selectedData = ['signal']
+    out = fc.output()['dataOut']
+
+    assert out is not None
+    assert 'signal_std' not in out
+    assert out.dependents() == ['signal']
+
+
+def test_data_selector_include_error_bars_can_be_disabled(qtbot):
+    """The escape hatch restores the old behaviour."""
+    from plottr.data.datadict import errorBarDataName
+
+    DataSelector.useUi = False
+    data = _errorBarDataDict()
+
+    fc = linearFlowchart(('selector', DataSelector))
+    node = fc.nodes()['selector']
+    node.include_error_bars = False
+    fc.setInput(dataIn=data)
+    node.selectedData = ['signal']
+    out = fc.output()['dataOut']
+
+    assert 'signal_std' not in out
+    assert errorBarDataName(out, 'signal') is None

@@ -1,10 +1,17 @@
 from enum import Enum, unique
 from typing import Dict, Optional
 
-from qcodes.plotting import find_scale_and_prefix
+try:
+    from qcodes.plotting import find_scale_and_prefix
+except ImportError:  # qcodes is an optional dependency
+    try:
+        from qcodes.utils.plotting import find_scale_and_prefix
+    except ImportError:
+        from plottr.utils.find_scale_and_prefix import find_scale_and_prefix
 
 from plottr import QtWidgets, Signal, Slot
-from plottr.data.datadict import DataDictBase
+from plottr.data.datadict import (DataDictBase, errorBarDataName,
+                                  plottableDependents)
 from plottr.node import Node, NodeWidget, updateOption
 
 
@@ -122,11 +129,30 @@ class ScaleUnits(Node):
         data = dataIn.copy()
 
         if self.scale_unit_option != ScaleUnitsOption.never:
-            for name, data_item in data.data_items():        
-                prefix, selected_scale = find_scale_and_prefix(
+            scales = {}
+            for name, data_item in data.data_items():
+                scales[name] = find_scale_and_prefix(
                     data_item['values'],
                     data_item["unit"]
                 )
+
+            # An error-bar field must be scaled exactly like the dependent it
+            # belongs to. Scaling them independently would silently corrupt the
+            # error bars, because errorBarData() only checks shapes, not units.
+            for dep in plottableDependents(data):
+                err = errorBarDataName(data, dep)
+                if err is None or err not in scales:
+                    continue
+                if data[err].get('unit', '') != data[dep].get('unit', ''):
+                    self.node_logger.warning(
+                        f'Error field {err} has unit '
+                        f'{data[err].get("unit", "")!r} but {dep} has '
+                        f'{data[dep].get("unit", "")!r}; scaling independently.')
+                    continue
+                scales[err] = scales[dep]
+
+            for name, data_item in data.data_items():
+                prefix, selected_scale = scales[name]
                 data_item["unit"] = prefix + data_item["unit"]
                 data_item['values'] = data_item['values'] * 10**(-selected_scale)
 
