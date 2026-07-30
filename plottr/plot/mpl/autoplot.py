@@ -2,12 +2,15 @@
 """
 
 import logging
+import os
 from collections import OrderedDict
 from typing import Dict, List, Tuple, Union, Optional, Any, Type, cast
 from types import TracebackType
 
 import numpy as np
+from matplotlib import rc_context, colormaps
 from matplotlib.axes import Axes
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from matplotlib.cm import ScalarMappable
@@ -18,7 +21,13 @@ from plottr.icons import (get_singleTracePlotIcon, get_multiTracePlotIcon, get_i
                           get_colormeshPlotIcon, get_scatterPlot2dIcon)
 from plottr.gui.tools import dpiScalingFactor
 from .plotting import (PlotType, colorplot2d, square_axes, AxesOptions,
-                       apply_axes_options_to_figure, AXIS_SCALES)
+                       apply_axes_options_to_figure, AXIS_SCALES,
+                       TICK_DIRECTIONS, LabelOptions, apply_label_options,
+                       apply_title, LEGEND_LOCATIONS, TraceOptions, TraceStyle,
+                       apply_trace_options, LINE_STYLES, MARKERS,
+                       ColorOptions, apply_color_options, ExportSpec,
+                       save_figure, FIGURE_WIDTH_PRESETS, EXPORT_FORMATS,
+                       figure_lines)
 from .widgets import MPLPlotWidget
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, PlotWidgetContainer, \
@@ -387,11 +396,11 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
         self.addSeparator()
 
-        self.axesOptions = self.addAction('Axes options…')
-        self.axesOptions.setToolTip(
-            'Adjust axis scales, ranges, grid and aspect ratio '
+        self.figureOptions = self.addAction('Figure options…')
+        self.figureOptions.setToolTip(
+            'Axes, labels, traces, colors and publication export '
             '(kept across re-draws).')
-        self.axesOptions.triggered.connect(
+        self.figureOptions.triggered.connect(
             lambda: self.axesOptionsRequested.emit())
 
         self.plotTypeActions = OrderedDict({
@@ -557,51 +566,91 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self._currentlyAllowedComplexTypes = complexOptions
 
 
-class AxesOptionsDialog(QtWidgets.QDialog):
-    """A small dialog to edit :class:`.AxesOptions` for an autoplot.
+class FigureOptionsDialog(QtWidgets.QDialog):
+    """A modeless dialog to configure a figure for publication.
 
-    The dialog is modeless and emits :attr:`optionsChanged` whenever the user
-    changes a value, so the plot can update live. All fields are optional; an
-    empty limit field means "auto", and the ``default`` scale/grid entries
-    leave matplotlib's own behaviour untouched.
+    Grouped into tabs: axes/ticks, labels & legend, per-trace styling, the
+    2D color scale, and export settings. Every control feeds one of the
+    option dataclasses in :mod:`.plotting`, which the plot widget re-applies
+    after each redraw, so nothing set here is lost when the data updates.
     """
 
-    #: emitted (with the new options) whenever the user edits a value
-    optionsChanged = Signal(AxesOptions)
+    #: emitted whenever the user changes any option. The plot widget then
+    #: reads the current values back through the ``*Options`` accessors.
+    optionsChanged = Signal()
+
+    #: emitted with a file path when the user asks to export the figure.
+    exportRequested = Signal(str)
 
     _gridChoices = OrderedDict([
         ('default', None),
         ('on', True),
         ('off', False),
     ])
+    _boolChoices = OrderedDict([
+        ('default', None),
+        ('on', True),
+        ('off', False),
+    ])
 
-    def __init__(self, options: AxesOptions,
-                 parent: Optional[QtWidgets.QWidget] = None):
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent=parent)
         self.setObjectName('axesOptionsDialog')
         self.setStyleSheet(DIALOG_STYLESHEET)
-        self.setWindowTitle('Axes options')
+        self.setWindowTitle('Figure options')
         self._updating = False
+        self._traceStyles: Dict[int, TraceStyle] = {}
+        self._currentTrace = 0
 
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._buildAxesTab(), 'Axes')
+        tabs.addTab(self._buildLabelsTab(), 'Labels')
+        tabs.addTab(self._buildTracesTab(), 'Traces')
+        tabs.addTab(self._buildColorTab(), 'Color')
+        tabs.addTab(self._buildExportTab(), 'Export')
+
+        self.resetButton = QtWidgets.QPushButton('Reset')
+        self.resetButton.clicked.connect(self.resetOptions)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.resetButton)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.addWidget(tabs)
+        layout.addLayout(buttons)
+
+        self._connectSignals()
+
+    # -- construction helpers ------------------------------------------------
+    @staticmethod
+    def _numberEdit(placeholder: str = 'auto') -> QtWidgets.QLineEdit:
+        w = QtWidgets.QLineEdit()
+        w.setPlaceholderText(placeholder)
+        w.setValidator(QtGui.QDoubleValidator(w))
+        return w
+
+    def _buildAxesTab(self) -> QtWidgets.QWidget:
         self.xscale = QtWidgets.QComboBox()
         self.xscale.addItems(['default'] + list(AXIS_SCALES))
         self.yscale = QtWidgets.QComboBox()
         self.yscale.addItems(['default'] + list(AXIS_SCALES))
-
-        self.xmin = QtWidgets.QLineEdit()
-        self.xmax = QtWidgets.QLineEdit()
-        self.ymin = QtWidgets.QLineEdit()
-        self.ymax = QtWidgets.QLineEdit()
-        for w in (self.xmin, self.xmax, self.ymin, self.ymax):
-            w.setPlaceholderText('auto')
-            w.setValidator(QtGui.QDoubleValidator(w))
-
+        self.xmin = self._numberEdit()
+        self.xmax = self._numberEdit()
+        self.ymin = self._numberEdit()
+        self.ymax = self._numberEdit()
         self.grid = QtWidgets.QComboBox()
         self.grid.addItems(list(self._gridChoices.keys()))
-
         self.equalAspect = QtWidgets.QCheckBox('equal (square) aspect ratio')
 
-        # X axis group
+        self.minorTicks = QtWidgets.QComboBox()
+        self.minorTicks.addItems(list(self._boolChoices.keys()))
+        self.tickDirection = QtWidgets.QComboBox()
+        self.tickDirection.addItems(['default'] + list(TICK_DIRECTIONS))
+        self.ticksAllSides = QtWidgets.QComboBox()
+        self.ticksAllSides.addItems(list(self._boolChoices.keys()))
+        self.noOffsetText = QtWidgets.QCheckBox('no offset / scientific text')
+
         xForm = QtWidgets.QFormLayout()
         xForm.addRow('scale', self.xscale)
         xForm.addRow('min', self.xmin)
@@ -609,7 +658,6 @@ class AxesOptionsDialog(QtWidgets.QDialog):
         xBox = QtWidgets.QGroupBox('X axis')
         xBox.setLayout(xForm)
 
-        # Y axis group
         yForm = QtWidgets.QFormLayout()
         yForm.addRow('scale', self.yscale)
         yForm.addRow('min', self.ymin)
@@ -617,37 +665,207 @@ class AxesOptionsDialog(QtWidgets.QDialog):
         yBox = QtWidgets.QGroupBox('Y axis')
         yBox.setLayout(yForm)
 
-        # Display group
-        dForm = QtWidgets.QFormLayout()
-        dForm.addRow('grid', self.grid)
-        dForm.addRow('aspect', self.equalAspect)
-        dBox = QtWidgets.QGroupBox('Display')
-        dBox.setLayout(dForm)
+        tForm = QtWidgets.QFormLayout()
+        tForm.addRow('grid', self.grid)
+        tForm.addRow('aspect', self.equalAspect)
+        tForm.addRow('minor ticks', self.minorTicks)
+        tForm.addRow('direction', self.tickDirection)
+        tForm.addRow('all sides', self.ticksAllSides)
+        tForm.addRow('numbers', self.noOffsetText)
+        tBox = QtWidgets.QGroupBox('Ticks and display')
+        tBox.setLayout(tForm)
 
-        self.resetButton = QtWidgets.QPushButton('Reset')
-        self.resetButton.clicked.connect(self.resetOptions)
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.addWidget(xBox)
+        lay.addWidget(yBox)
+        lay.addWidget(tBox)
+        lay.addStretch(1)
+        return w
 
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.addStretch(1)
-        buttons.addWidget(self.resetButton)
+    def _buildLabelsTab(self) -> QtWidgets.QWidget:
+        self.showTitle = QtWidgets.QCheckBox('show title')
+        self.title = QtWidgets.QLineEdit()
+        self.title.setPlaceholderText('(file name)')
+        self.xlabel = QtWidgets.QLineEdit()
+        self.ylabel = QtWidgets.QLineEdit()
+        self.colorbarLabel = QtWidgets.QLineEdit()
+        for w_ in (self.xlabel, self.ylabel, self.colorbarLabel):
+            w_.setPlaceholderText('(from data)')
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.addWidget(xBox)
-        layout.addWidget(yBox)
-        layout.addWidget(dBox)
-        layout.addLayout(buttons)
+        self.showLegend = QtWidgets.QComboBox()
+        self.showLegend.addItems(list(self._boolChoices.keys()))
+        self.legendLocation = QtWidgets.QComboBox()
+        self.legendLocation.addItems(['default'] + list(LEGEND_LOCATIONS))
+        self.legendFrame = QtWidgets.QComboBox()
+        self.legendFrame.addItems(list(self._boolChoices.keys()))
+        self.legendColumns = QtWidgets.QSpinBox()
+        self.legendColumns.setRange(0, 8)
+        self.legendColumns.setSpecialValueText('default')
 
-        self.setOptions(options)
+        tForm = QtWidgets.QFormLayout()
+        tForm.addRow('', self.showTitle)
+        tForm.addRow('title', self.title)
+        tForm.addRow('x label', self.xlabel)
+        tForm.addRow('y label', self.ylabel)
+        tForm.addRow('colorbar', self.colorbarLabel)
+        tBox = QtWidgets.QGroupBox('Text')
+        tBox.setLayout(tForm)
 
-        # connect after initial population to avoid spurious signals
-        self.xscale.currentIndexChanged.connect(self._emit)
-        self.yscale.currentIndexChanged.connect(self._emit)
-        self.grid.currentIndexChanged.connect(self._emit)
-        self.equalAspect.toggled.connect(self._emit)
-        for w in (self.xmin, self.xmax, self.ymin, self.ymax):
-            w.editingFinished.connect(self._emit)
+        lForm = QtWidgets.QFormLayout()
+        lForm.addRow('show', self.showLegend)
+        lForm.addRow('location', self.legendLocation)
+        lForm.addRow('frame', self.legendFrame)
+        lForm.addRow('columns', self.legendColumns)
+        lBox = QtWidgets.QGroupBox('Legend')
+        lBox.setLayout(lForm)
 
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.addWidget(tBox)
+        lay.addWidget(lBox)
+        lay.addStretch(1)
+        return w
+
+    def _buildTracesTab(self) -> QtWidgets.QWidget:
+        self.traceSelector = QtWidgets.QComboBox()
+        self.traceColor = QtWidgets.QLineEdit()
+        self.traceColor.setPlaceholderText('(default) e.g. C0 or #1f77b4')
+        self.traceLinestyle = QtWidgets.QComboBox()
+        self.traceLinestyle.addItems(['default'] + list(LINE_STYLES))
+        self.traceLinewidth = self._numberEdit('default')
+        self.traceMarker = QtWidgets.QComboBox()
+        self.traceMarker.addItems(['default'] + list(MARKERS))
+        self.traceMarkersize = self._numberEdit('default')
+        self.traceAlpha = self._numberEdit('default')
+
+        self.markerLimit = QtWidgets.QSpinBox()
+        self.markerLimit.setRange(0, 1000000)
+        self.markerLimit.setSpecialValueText('off')
+        self.markerLimit.setValue(TraceOptions().markerLimit or 0)
+        self.markerLimit.setToolTip(
+            'Traces with more points than this are drawn without markers, '
+            'so dense sweeps stay legible in print.')
+
+        sForm = QtWidgets.QFormLayout()
+        sForm.addRow('trace', self.traceSelector)
+        sForm.addRow('color', self.traceColor)
+        sForm.addRow('line style', self.traceLinestyle)
+        sForm.addRow('line width', self.traceLinewidth)
+        sForm.addRow('marker', self.traceMarker)
+        sForm.addRow('marker size', self.traceMarkersize)
+        sForm.addRow('alpha', self.traceAlpha)
+        sBox = QtWidgets.QGroupBox('Per-trace style')
+        sBox.setLayout(sForm)
+
+        gForm = QtWidgets.QFormLayout()
+        gForm.addRow('drop markers above', self.markerLimit)
+        gBox = QtWidgets.QGroupBox('All traces')
+        gBox.setLayout(gForm)
+
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.addWidget(sBox)
+        lay.addWidget(gBox)
+        lay.addStretch(1)
+        return w
+
+    def _buildColorTab(self) -> QtWidgets.QWidget:
+        self.colormap = QtWidgets.QComboBox()
+        self.colormap.setEditable(True)
+        self.colormap.addItems(['default'] + sorted(colormaps()))
+        self.vmin = self._numberEdit()
+        self.vmax = self._numberEdit()
+        self.symmetric = QtWidgets.QCheckBox('symmetric around center')
+        self.symmetricCenter = self._numberEdit('0')
+
+        form = QtWidgets.QFormLayout()
+        form.addRow('colormap', self.colormap)
+        form.addRow('min', self.vmin)
+        form.addRow('max', self.vmax)
+        form.addRow('', self.symmetric)
+        form.addRow('center', self.symmetricCenter)
+        box = QtWidgets.QGroupBox('Color scale (2D plots)')
+        box.setLayout(form)
+
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.addWidget(box)
+        lay.addStretch(1)
+        return w
+
+    def _buildExportTab(self) -> QtWidgets.QWidget:
+        self.sizePreset = QtWidgets.QComboBox()
+        self.sizePreset.addItems(list(FIGURE_WIDTH_PRESETS.keys()))
+        self.exportWidth = self._numberEdit('auto')
+        self.exportHeight = self._numberEdit('auto')
+        self.exportDpi = QtWidgets.QSpinBox()
+        self.exportDpi.setRange(50, 2400)
+        self.exportDpi.setValue(300)
+        self.exportFormat = QtWidgets.QComboBox()
+        self.exportFormat.addItems(list(EXPORT_FORMATS))
+        self.exportTransparent = QtWidgets.QCheckBox('transparent background')
+        self.exportFontSize = self._numberEdit('8')
+        self.exportFontFamily = QtWidgets.QLineEdit()
+        self.exportFontFamily.setPlaceholderText('(current)')
+
+        self.exportButton = QtWidgets.QPushButton('Export figure…')
+        self.exportButton.clicked.connect(self._chooseExportFile)
+
+        form = QtWidgets.QFormLayout()
+        form.addRow('preset', self.sizePreset)
+        form.addRow('width (in)', self.exportWidth)
+        form.addRow('height (in)', self.exportHeight)
+        form.addRow('dpi', self.exportDpi)
+        form.addRow('format', self.exportFormat)
+        form.addRow('', self.exportTransparent)
+        form.addRow('font size (pt)', self.exportFontSize)
+        form.addRow('font family', self.exportFontFamily)
+        box = QtWidgets.QGroupBox('Output')
+        box.setLayout(form)
+
+        note = QtWidgets.QLabel(
+            'The figure is rendered at exactly this size, independently of '
+            'the window, with fonts embedded as TrueType.')
+        note.setWordWrap(True)
+
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.addWidget(box)
+        lay.addWidget(note)
+        lay.addWidget(self.exportButton)
+        lay.addStretch(1)
+        return w
+
+    def _connectSignals(self) -> None:
+        combos = [self.xscale, self.yscale, self.grid, self.minorTicks,
+                  self.tickDirection, self.ticksAllSides, self.showLegend,
+                  self.legendLocation, self.legendFrame, self.colormap]
+        for c in combos:
+            c.currentIndexChanged.connect(self._emit)
+        checks = [self.equalAspect, self.noOffsetText, self.showTitle,
+                  self.symmetric]
+        for ch in checks:
+            ch.toggled.connect(self._emit)
+        edits = [self.xmin, self.xmax, self.ymin, self.ymax, self.title,
+                 self.xlabel, self.ylabel, self.colorbarLabel, self.vmin,
+                 self.vmax, self.symmetricCenter]
+        for e in edits:
+            e.editingFinished.connect(self._emit)
+        self.legendColumns.valueChanged.connect(self._emit)
+        self.markerLimit.valueChanged.connect(self._emit)
+
+        # trace styling
+        self.traceSelector.currentIndexChanged.connect(self._traceSelected)
+        for wdg in (self.traceLinestyle, self.traceMarker):
+            wdg.currentIndexChanged.connect(self._traceStyleEdited)
+        for wdg2 in (self.traceColor, self.traceLinewidth,
+                     self.traceMarkersize, self.traceAlpha):
+            wdg2.editingFinished.connect(self._traceStyleEdited)
+
+        self.sizePreset.currentIndexChanged.connect(self._presetSelected)
+
+    # -- value conversion ----------------------------------------------------
     @staticmethod
     def _floatOrNone(text: str) -> Optional[float]:
         text = text.strip()
@@ -659,47 +877,171 @@ class AxesOptionsDialog(QtWidgets.QDialog):
             return None
 
     @staticmethod
-    def _scaleOrNone(text: str) -> Optional[str]:
+    def _textOrNone(text: str) -> Optional[str]:
+        return text if text.strip() != '' else None
+
+    @staticmethod
+    def _choiceOrNone(text: str) -> Optional[str]:
         return None if text == 'default' else text
 
-    def currentOptions(self) -> AxesOptions:
-        """Build an :class:`.AxesOptions` from the current widget state."""
+    def _boolChoice(self, combo: QtWidgets.QComboBox) -> Optional[bool]:
+        return self._boolChoices[combo.currentText()]
+
+    # -- accessors -----------------------------------------------------------
+    def axesOptions(self) -> AxesOptions:
         return AxesOptions(
-            xscale=self._scaleOrNone(self.xscale.currentText()),
-            yscale=self._scaleOrNone(self.yscale.currentText()),
+            xscale=self._choiceOrNone(self.xscale.currentText()),
+            yscale=self._choiceOrNone(self.yscale.currentText()),
             xmin=self._floatOrNone(self.xmin.text()),
             xmax=self._floatOrNone(self.xmax.text()),
             ymin=self._floatOrNone(self.ymin.text()),
             ymax=self._floatOrNone(self.ymax.text()),
             grid=self._gridChoices[self.grid.currentText()],
             equalAspect=self.equalAspect.isChecked(),
+            minorTicks=self._boolChoice(self.minorTicks),
+            tickDirection=self._choiceOrNone(self.tickDirection.currentText()),
+            ticksAllSides=self._boolChoice(self.ticksAllSides),
+            noOffsetText=self.noOffsetText.isChecked() or None,
         )
 
-    def setOptions(self, options: AxesOptions) -> None:
-        """Populate the widgets from an :class:`.AxesOptions` instance."""
+    def labelOptions(self) -> LabelOptions:
+        columns = self.legendColumns.value()
+        return LabelOptions(
+            title=self._textOrNone(self.title.text()),
+            showTitle=self.showTitle.isChecked(),
+            xlabel=self._textOrNone(self.xlabel.text()),
+            ylabel=self._textOrNone(self.ylabel.text()),
+            colorbarLabel=self._textOrNone(self.colorbarLabel.text()),
+            showLegend=self._boolChoice(self.showLegend),
+            legendLocation=self._choiceOrNone(
+                self.legendLocation.currentText()),
+            legendFrame=self._boolChoice(self.legendFrame),
+            legendColumns=columns if columns > 0 else None,
+        )
+
+    def traceOptions(self) -> TraceOptions:
+        limit = self.markerLimit.value()
+        return TraceOptions(styles=dict(self._traceStyles),
+                            markerLimit=limit if limit > 0 else None)
+
+    def colorOptions(self) -> ColorOptions:
+        return ColorOptions(
+            colormap=self._choiceOrNone(self.colormap.currentText()),
+            vmin=self._floatOrNone(self.vmin.text()),
+            vmax=self._floatOrNone(self.vmax.text()),
+            symmetric=self.symmetric.isChecked(),
+            symmetricCenter=self._floatOrNone(
+                self.symmetricCenter.text()) or 0.0,
+        )
+
+    def exportSpec(self) -> ExportSpec:
+        return ExportSpec(
+            width=self._floatOrNone(self.exportWidth.text()),
+            height=self._floatOrNone(self.exportHeight.text()),
+            dpi=self.exportDpi.value(),
+            format=self.exportFormat.currentText(),
+            transparent=self.exportTransparent.isChecked(),
+            fontSize=self._floatOrNone(self.exportFontSize.text()) or 8.0,
+            fontFamily=self._textOrNone(self.exportFontFamily.text()),
+        )
+
+    # -- trace handling ------------------------------------------------------
+    def setTraceNames(self, names: List[str]) -> None:
+        """Populate the per-trace selector with the current traces."""
+        current = self.traceSelector.currentIndex()
+        self.traceSelector.blockSignals(True)
+        self.traceSelector.clear()
+        for i, n in enumerate(names):
+            self.traceSelector.addItem(n or f'trace {i}', i)
+        if 0 <= current < len(names):
+            self.traceSelector.setCurrentIndex(current)
+        self.traceSelector.blockSignals(False)
+        self._currentTrace = max(0, self.traceSelector.currentIndex())
+        self._showTraceStyle()
+
+    def _showTraceStyle(self) -> None:
+        style = self._traceStyles.get(self._currentTrace, TraceStyle())
         self._updating = True
-        self.xscale.setCurrentText(options.xscale or 'default')
-        self.yscale.setCurrentText(options.yscale or 'default')
-        self.xmin.setText('' if options.xmin is None else repr(options.xmin))
-        self.xmax.setText('' if options.xmax is None else repr(options.xmax))
-        self.ymin.setText('' if options.ymin is None else repr(options.ymin))
-        self.ymax.setText('' if options.ymax is None else repr(options.ymax))
-        grid_label = next(k for k, v in self._gridChoices.items()
-                          if v is options.grid)
-        self.grid.setCurrentText(grid_label)
-        self.equalAspect.setChecked(options.equalAspect)
+        self.traceColor.setText(style.color or '')
+        self.traceLinestyle.setCurrentText(
+            'default' if style.linestyle is None else style.linestyle)
+        self.traceLinewidth.setText(
+            '' if style.linewidth is None else repr(style.linewidth))
+        self.traceMarker.setCurrentText(
+            'default' if style.marker is None else style.marker)
+        self.traceMarkersize.setText(
+            '' if style.markersize is None else repr(style.markersize))
+        self.traceAlpha.setText(
+            '' if style.alpha is None else repr(style.alpha))
         self._updating = False
 
+    @Slot(int)
+    def _traceSelected(self, index: int) -> None:
+        self._currentTrace = max(0, index)
+        self._showTraceStyle()
+
+    @Slot()
+    def _traceStyleEdited(self) -> None:
+        if self._updating:
+            return
+        style = TraceStyle(
+            color=self._textOrNone(self.traceColor.text()),
+            linestyle=self._choiceOrNone(self.traceLinestyle.currentText()),
+            linewidth=self._floatOrNone(self.traceLinewidth.text()),
+            marker=self._choiceOrNone(self.traceMarker.currentText()),
+            markersize=self._floatOrNone(self.traceMarkersize.text()),
+            alpha=self._floatOrNone(self.traceAlpha.text()),
+        )
+        self._traceStyles[self._currentTrace] = style
+        self._emit()
+
+    # -- export --------------------------------------------------------------
+    @Slot(int)
+    def _presetSelected(self, index: int) -> None:
+        width = FIGURE_WIDTH_PRESETS.get(self.sizePreset.currentText())
+        self._updating = True
+        self.exportWidth.setText('' if width is None else f'{width:.4g}')
+        self._updating = False
+        self._emit()
+
+    @Slot()
+    def _chooseExportFile(self) -> None:
+        fmt = self.exportFormat.currentText()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 'Export figure', f'figure.{fmt}',
+            f'{fmt.upper()} (*.{fmt});;All files (*)')
+        if path:
+            self.exportRequested.emit(path)
+
+    # -- misc ----------------------------------------------------------------
     @Slot()
     def resetOptions(self) -> None:
-        """Reset all fields to their neutral (do-nothing) values."""
-        self.setOptions(AxesOptions())
+        """Reset every field to its neutral (do-nothing) value."""
+        self._updating = True
+        for combo in (self.xscale, self.yscale, self.grid, self.minorTicks,
+                      self.tickDirection, self.ticksAllSides, self.showLegend,
+                      self.legendLocation, self.legendFrame, self.colormap,
+                      self.traceLinestyle, self.traceMarker):
+            combo.setCurrentText('default')
+        for edit in (self.xmin, self.xmax, self.ymin, self.ymax, self.title,
+                     self.xlabel, self.ylabel, self.colorbarLabel, self.vmin,
+                     self.vmax, self.symmetricCenter, self.traceColor,
+                     self.traceLinewidth, self.traceMarkersize,
+                     self.traceAlpha):
+            edit.setText('')
+        for check in (self.equalAspect, self.noOffsetText, self.showTitle,
+                      self.symmetric):
+            check.setChecked(False)
+        self.legendColumns.setValue(0)
+        self.markerLimit.setValue(200)
+        self._traceStyles.clear()
+        self._updating = False
         self._emit()
 
     @Slot()
     def _emit(self) -> None:
         if not self._updating:
-            self.optionsChanged.emit(self.currentOptions())
+            self.optionsChanged.emit()
 
 
 class AutoPlot(MPLPlotWidget):
@@ -726,9 +1068,14 @@ class AutoPlot(MPLPlotWidget):
         self.phaseDegrees = False
         self.phaseUnwrap = False
 
-        # User-adjustable matplotlib axes options (persist across re-draws).
+        # User-adjustable figure options. All of these persist across the
+        # automatic re-drawing that happens on every data/option change.
         self.axesOptions = AxesOptions()
-        self._axesOptionsDialog: Optional[AxesOptionsDialog] = None
+        self.labelOptions = LabelOptions()
+        self.traceOptions = TraceOptions()
+        self.colorOptions = ColorOptions()
+        self.exportSpec = ExportSpec()
+        self._optionsDialog: Optional[FigureOptionsDialog] = None
 
         # A toolbar for configuring the plot
         self.plotOptionsToolBar = AutoPlotToolBar('Plot options', self)
@@ -844,36 +1191,68 @@ class AutoPlot(MPLPlotWidget):
 
     @Slot()
     def _showAxesOptionsDialog(self) -> None:
-        """Open (or raise) the modeless axes-options dialog."""
-        if self._axesOptionsDialog is None:
-            self._axesOptionsDialog = AxesOptionsDialog(self.axesOptions, self)
-            self._axesOptionsDialog.optionsChanged.connect(
-                self._axesOptionsChanged)
-        else:
-            self._axesOptionsDialog.setOptions(self.axesOptions)
-        self._axesOptionsDialog.show()
-        self._axesOptionsDialog.raise_()
-        self._axesOptionsDialog.activateWindow()
+        """Open (or raise) the modeless figure-options dialog."""
+        if self._optionsDialog is None:
+            self._optionsDialog = FigureOptionsDialog(self)
+            self._optionsDialog.optionsChanged.connect(self._optionsChanged)
+            self._optionsDialog.exportRequested.connect(self._exportRequested)
+        self._optionsDialog.setTraceNames(self.traceNames())
+        self._optionsDialog.show()
+        self._optionsDialog.raise_()
+        self._optionsDialog.activateWindow()
 
-    @Slot(AxesOptions)
-    def _axesOptionsChanged(self, options: AxesOptions) -> None:
-        self.axesOptions = options
+    def traceNames(self) -> List[str]:
+        """Labels of the traces currently drawn, for the per-trace UI."""
+        return [str(line.get_label()) for line in figure_lines(self.plot.fig)]
+
+    @Slot()
+    def _optionsChanged(self) -> None:
+        """Pull every option group back from the dialog and re-draw."""
+        dialog = self._optionsDialog
+        if dialog is None:
+            return
+        self.axesOptions = dialog.axesOptions()
+        self.labelOptions = dialog.labelOptions()
+        self.traceOptions = dialog.traceOptions()
+        self.colorOptions = dialog.colorOptions()
+        self.exportSpec = dialog.exportSpec()
         self._plotData()
+        dialog.setTraceNames(self.traceNames())
 
-    def _plotData(self) -> None:
-        """Plot the data using previously determined data and plot types."""
+    @Slot(str)
+    def _exportRequested(self, filepath: str) -> None:
+        if self._optionsDialog is not None:
+            self.exportSpec = self._optionsDialog.exportSpec()
+        try:
+            self.exportFigure(filepath, self.exportSpec)
+        except Exception as e:
+            logger.error(f"Could not export figure to {filepath}: {e}")
+            QtWidgets.QMessageBox.warning(
+                self, 'Export failed', f'Could not write {filepath}:\n{e}')
 
+    def _canPlot(self) -> bool:
+        """Whether there is currently something plottable."""
         if self.plotDataType is PlotDataType.unknown:
             logger.debug("No plottable data.")
-            return
+            return False
         if self.plotType is PlotType.empty:
             logger.debug("No plot routine determined.")
-            return
+            return False
+        return self.data is not None
 
+    def _buildFigure(self, fig: Figure) -> None:
+        """Draw the current data into `fig` and apply all user options.
+
+        Factored out of :meth:`_plotData` so that the very same drawing code
+        can render either the on-screen canvas or a separate, exactly-sized
+        figure for export.
+
+        :param fig: the figure to draw into. It is cleared first.
+        """
         assert self.data is not None
 
         kw: Dict[str, Any] = {}
-        with FigureMaker(self.plot.fig) as fm:
+        with FigureMaker(fig) as fm:
             fm.plotType = self.plotType
             if not self.dataIsComplex():
                 fm.complexRepresentation = ComplexRepresentation.real
@@ -890,14 +1269,61 @@ class AutoPlot(MPLPlotWidget):
                     kw[ERROR_BAR_KEY] = yerr
                 else:
                     kw.pop(ERROR_BAR_KEY, None)
-                plotId = fm.addData(
+                fm.addData(
                     *[np.asanyarray(self.data.data_vals(n)) for n in indeps] + [dvals],
                     labels=[str(self.data.label(n)) for n in indeps] + [str(self.data.label(dn))],
                     plotDataType=self.plotDataType,
                     **kw)
 
-        # re-apply user axes options so they survive automatic re-drawing.
-        apply_axes_options_to_figure(self.plot.fig, self.axesOptions)
+        # re-apply user options so they survive automatic re-drawing.
+        apply_axes_options_to_figure(fig, self.axesOptions)
+        apply_trace_options(fig, self.traceOptions)
+        apply_color_options(fig, self.colorOptions)
+        apply_label_options(fig, self.labelOptions)
+        apply_title(fig, self.labelOptions, default=self.defaultTitle())
 
+    def defaultTitle(self) -> str:
+        """Title to use when the user has not set one explicitly."""
+        if self.data is None or not self.data.has_meta('title'):
+            return ''
+        # the loader puts the full file path in here, which is not something
+        # anyone wants printed on a figure.
+        return os.path.basename(str(self.data.meta_val('title')))
+
+    def _plotData(self) -> None:
+        """Plot the data using previously determined data and plot types."""
+        if not self._canPlot():
+            return
+        assert self.data is not None
+
+        self._buildFigure(self.plot.fig)
         self.setMeta(self.data)
         self.updatePlot()
+
+    def exportFigure(self, filepath: str,
+                     spec: Optional[ExportSpec] = None) -> bool:
+        """Render the current plot into a file at an exact physical size.
+
+        The figure is drawn into a *fresh* figure of the size given by `spec`,
+        under export-specific rcParams (TrueType font embedding, a fixed font
+        size). The on-screen canvas is untouched, so the exported result does
+        not depend on the window size or the monitor's DPI.
+
+        :param filepath: where to write the file.
+        :param spec: export settings; defaults to :attr:`exportSpec`.
+        :return: whether anything was written.
+        """
+        if not self._canPlot():
+            return False
+
+        if spec is None:
+            spec = self.exportSpec
+
+        with rc_context(spec.rcParams()):
+            fig = Figure(figsize=spec.size(), dpi=spec.dpi,
+                         constrained_layout=True)
+            # a canvas is required for savefig to pick the right backend
+            FigureCanvasAgg(fig)
+            self._buildFigure(fig)
+            save_figure(fig, filepath, spec)
+        return True

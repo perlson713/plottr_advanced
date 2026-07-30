@@ -2,9 +2,11 @@
 ``plottr.plot.mpl.plotting`` -- Plotting tools (mostly used in Autoplot)
 """
 
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from enum import Enum, auto, unique
-from typing import Any, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast, \
+    OrderedDict as OrderedDictType
 
 import numpy as np
 from matplotlib import colors, rcParams
@@ -12,6 +14,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.cm import ScalarMappable
+from matplotlib.ticker import ScalarFormatter
 
 from plottr.utils import num
 from plottr.utils.num import centers2edges_2d, interp_meshgrid_2d
@@ -220,6 +223,9 @@ def plotImage(ax: Axes, x: np.ndarray, y: np.ndarray,
 #: matplotlib axis scales we expose in the GUI.
 AXIS_SCALES: Tuple[str, ...] = ('linear', 'log', 'symlog')
 
+#: tick directions we expose in the GUI.
+TICK_DIRECTIONS: Tuple[str, ...] = ('out', 'in', 'inout')
+
 
 def square_axes(ax: Axes) -> None:
     """Give an axes a square plot range with equal aspect ratio.
@@ -278,6 +284,14 @@ class AxesOptions:
     grid: Optional[bool] = None
     #: whether to force an equal (square) aspect ratio.
     equalAspect: bool = False
+    #: whether to show minor ticks; ``None`` leaves the default.
+    minorTicks: Optional[bool] = None
+    #: tick direction, one of :data:`TICK_DIRECTIONS`; ``None`` leaves default.
+    tickDirection: Optional[str] = None
+    #: whether to draw ticks on the top/right spines as well.
+    ticksAllSides: Optional[bool] = None
+    #: whether to suppress the shared exponent/offset text on the axes.
+    noOffsetText: Optional[bool] = None
 
     def isDefault(self) -> bool:
         """Whether all options are at their neutral (do-nothing) value."""
@@ -286,6 +300,8 @@ class AxesOptions:
             and self.xmin is None and self.xmax is None
             and self.ymin is None and self.ymax is None
             and self.grid is None and not self.equalAspect
+            and self.minorTicks is None and self.tickDirection is None
+            and self.ticksAllSides is None and self.noOffsetText is None
         )
 
 
@@ -310,6 +326,29 @@ def apply_axes_options(ax: Axes, options: AxesOptions) -> None:
     if options.equalAspect:
         ax.set_aspect('equal', adjustable='box')
 
+    if options.minorTicks is not None:
+        if options.minorTicks:
+            ax.minorticks_on()
+        else:
+            ax.minorticks_off()
+
+    tickKw: Dict[str, Any] = {}
+    if options.tickDirection is not None:
+        tickKw['direction'] = options.tickDirection
+    if options.ticksAllSides is not None:
+        tickKw.update(top=options.ticksAllSides, right=options.ticksAllSides)
+    if tickKw:
+        ax.tick_params(which='both', **tickKw)
+
+    if options.noOffsetText:
+        # journals generally want the factor spelled out in the axis label
+        # rather than as a floating "1e9" in the corner.
+        for axis in (ax.xaxis, ax.yaxis):
+            formatter = axis.get_major_formatter()
+            if isinstance(formatter, ScalarFormatter):
+                formatter.set_useOffset(False)
+                formatter.set_scientific(False)
+
     # limits are applied last so that they win over any autoscaling triggered
     # by the settings above. A value of None keeps the current (auto) limit.
     if options.xmin is not None or options.xmax is not None:
@@ -330,3 +369,352 @@ def apply_axes_options_to_figure(fig: Figure, options: AxesOptions) -> None:
         return
     for ax in data_axes(fig):
         apply_axes_options(ax, options)
+
+
+# Labels, legend and title ---------------------------------------------------
+
+#: legend locations we expose in the GUI.
+LEGEND_LOCATIONS: Tuple[str, ...] = (
+    'best', 'upper right', 'upper left', 'lower left', 'lower right',
+    'right', 'center left', 'center right', 'lower center', 'upper center',
+    'center',
+)
+
+
+@dataclass
+class LabelOptions:
+    """User overrides for the figure's text.
+
+    Labels are normally derived from the data (``name (unit)``), which is fine
+    on screen but rarely what a paper wants. Any field left ``None`` keeps the
+    automatically derived text.
+    """
+
+    #: figure title; ``''`` explicitly removes it, ``None`` keeps the default.
+    title: Optional[str] = None
+    #: whether to draw the figure title at all.
+    showTitle: bool = False
+    #: x axis label override.
+    xlabel: Optional[str] = None
+    #: y axis label override.
+    ylabel: Optional[str] = None
+    #: colorbar label override.
+    colorbarLabel: Optional[str] = None
+    #: whether to draw a legend; ``None`` keeps the automatic behaviour.
+    showLegend: Optional[bool] = None
+    #: legend location, one of :data:`LEGEND_LOCATIONS`.
+    legendLocation: Optional[str] = None
+    #: whether the legend has a frame.
+    legendFrame: Optional[bool] = None
+    #: number of legend columns.
+    legendColumns: Optional[int] = None
+
+    def isDefault(self) -> bool:
+        """Whether all options are at their neutral (do-nothing) value."""
+        return (
+            self.title is None and not self.showTitle
+            and self.xlabel is None and self.ylabel is None
+            and self.colorbarLabel is None and self.showLegend is None
+            and self.legendLocation is None and self.legendFrame is None
+            and self.legendColumns is None
+        )
+
+
+def apply_label_options(fig: Figure, options: LabelOptions) -> None:
+    """Apply :class:`LabelOptions` to a figure.
+
+    The x label is applied to every data axes, since panels of a multi-panel
+    plot share the same independent variable. The y label only goes to the
+    first one, because the panels show different quantities (magnitude and
+    phase, say) and one shared label would be wrong.
+    """
+    if options.isDefault():
+        return
+
+    axes = data_axes(fig)
+    if not axes:
+        return
+
+    if options.xlabel is not None:
+        for ax in axes:
+            ax.set_xlabel(options.xlabel)
+    if options.ylabel is not None:
+        axes[0].set_ylabel(options.ylabel)
+
+    if options.colorbarLabel is not None:
+        for ax in fig.axes:
+            if ax.get_label() == '<colorbar>':
+                ax.set_ylabel(options.colorbarLabel)
+
+    if options.showLegend is not None or options.legendLocation is not None \
+            or options.legendFrame is not None \
+            or options.legendColumns is not None:
+        for ax in axes:
+            _apply_legend(ax, options)
+
+
+def _apply_legend(ax: Axes, options: LabelOptions) -> None:
+    """Re-draw (or remove) the legend of an axes according to `options`."""
+    existing = ax.get_legend()
+
+    if options.showLegend is False:
+        if existing is not None:
+            existing.remove()
+        return
+
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    # only create a legend we weren't asked for if one is already there
+    if options.showLegend is None and existing is None:
+        return
+
+    kw: Dict[str, Any] = {'fontsize': 'small'}
+    kw['loc'] = options.legendLocation or 'best'
+    if options.legendFrame is not None:
+        kw['frameon'] = options.legendFrame
+    if options.legendColumns is not None and options.legendColumns > 0:
+        kw['ncol'] = options.legendColumns
+    ax.legend(handles, labels, **kw)
+
+
+def apply_title(fig: Figure, options: LabelOptions, default: str = '') -> None:
+    """Set (or clear) the figure title according to `options`.
+
+    :param fig: figure to title.
+    :param options: the label options.
+    :param default: title to use when the user has not overridden it.
+    """
+    if not options.showTitle:
+        return
+    title = options.title if options.title is not None else default
+    if title:
+        fig.suptitle(title, horizontalalignment='center',
+                     verticalalignment='top', fontsize='small')
+
+
+# Per-trace styling ----------------------------------------------------------
+
+#: line styles we expose in the GUI. ``''`` means no connecting line.
+LINE_STYLES: Tuple[str, ...] = ('-', '--', '-.', ':', '')
+
+#: markers we expose in the GUI. ``''`` means no marker.
+MARKERS: Tuple[str, ...] = ('', 'o', '.', 's', '^', 'v', 'D', 'x', '+')
+
+
+@dataclass
+class TraceStyle:
+    """Appearance overrides for a single plotted line."""
+
+    color: Optional[str] = None
+    linestyle: Optional[str] = None
+    linewidth: Optional[float] = None
+    marker: Optional[str] = None
+    markersize: Optional[float] = None
+    alpha: Optional[float] = None
+
+    def isDefault(self) -> bool:
+        return all(v is None for v in (self.color, self.linestyle,
+                                       self.linewidth, self.marker,
+                                       self.markersize, self.alpha))
+
+
+@dataclass
+class TraceOptions:
+    """Per-trace styling for a figure, keyed by trace index."""
+
+    #: style overrides, keyed by the index of the line within the figure.
+    styles: Dict[int, TraceStyle] = field(default_factory=dict)
+
+    #: above this many points, markers are dropped automatically so dense
+    #: sweeps do not turn into a solid blob in print. ``None`` disables this.
+    markerLimit: Optional[int] = 200
+
+    def isDefault(self) -> bool:
+        return (all(s.isDefault() for s in self.styles.values())
+                and self.markerLimit is None)
+
+
+def figure_lines(fig: Figure) -> List[Any]:
+    """The data lines of a figure's data axes, in a stable order.
+
+    Helper lines created by ``Axes.errorbar`` (bars and caps) are excluded:
+    they are labelled ``_nolegend_`` and are not traces the user styles.
+    """
+    lines: List[Any] = []
+    for ax in data_axes(fig):
+        lines.extend(l for l in ax.lines
+                     if str(l.get_label()) != '_nolegend_')
+    return lines
+
+
+def apply_trace_options(fig: Figure, options: TraceOptions) -> None:
+    """Apply :class:`TraceOptions` to the lines of a figure."""
+    if options.isDefault():
+        return
+
+    for i, line in enumerate(figure_lines(fig)):
+        if options.markerLimit is not None:
+            try:
+                npoints = len(line.get_xdata())
+            except TypeError:
+                npoints = 0
+            if npoints > options.markerLimit:
+                line.set_marker('')
+
+        style = options.styles.get(i)
+        if style is None or style.isDefault():
+            continue
+        if style.color is not None:
+            line.set_color(style.color)
+        if style.linestyle is not None:
+            line.set_linestyle(style.linestyle)
+        if style.linewidth is not None:
+            line.set_linewidth(style.linewidth)
+        if style.marker is not None:
+            line.set_marker(style.marker if style.marker else 'None')
+        if style.markersize is not None:
+            line.set_markersize(style.markersize)
+        if style.alpha is not None:
+            line.set_alpha(style.alpha)
+
+
+# Color scale (2D plots) -----------------------------------------------------
+
+@dataclass
+class ColorOptions:
+    """Color-scale settings for 2D plots."""
+
+    #: name of the colormap; ``None`` keeps the rcParams default.
+    colormap: Optional[str] = None
+    #: lower limit of the color scale.
+    vmin: Optional[float] = None
+    #: upper limit of the color scale.
+    vmax: Optional[float] = None
+    #: whether to use a norm that is symmetric around :attr:`symmetricCenter`.
+    symmetric: bool = False
+    #: center value for the symmetric norm.
+    symmetricCenter: float = 0.0
+
+    def isDefault(self) -> bool:
+        return (self.colormap is None and self.vmin is None
+                and self.vmax is None and not self.symmetric)
+
+
+def figure_mappables(fig: Figure) -> List[ScalarMappable]:
+    """All color-mapped artists (images, meshes, scatters) of a figure."""
+    mappables: List[ScalarMappable] = []
+    for ax in data_axes(fig):
+        mappables.extend(ax.images)
+        mappables.extend(ax.collections)
+    return mappables
+
+
+def apply_color_options(fig: Figure, options: ColorOptions) -> None:
+    """Apply :class:`ColorOptions` to the color-mapped artists of a figure."""
+    if options.isDefault():
+        return
+
+    for mappable in figure_mappables(fig):
+        if options.colormap is not None:
+            mappable.set_cmap(options.colormap)
+
+        if options.symmetric:
+            vmin, vmax = mappable.get_clim()
+            if options.vmin is not None:
+                vmin = options.vmin
+            if options.vmax is not None:
+                vmax = options.vmax
+            norm = SymmetricNorm(vmin=vmin, vmax=vmax,
+                                 vcenter=options.symmetricCenter)
+            mappable.set_norm(norm)
+        else:
+            if options.vmin is not None or options.vmax is not None:
+                mappable.set_clim(vmin=options.vmin, vmax=options.vmax)
+
+
+# Export ---------------------------------------------------------------------
+
+#: named figure widths (in inches) for common journal column layouts.
+#: The saved figure must have an exact physical width so that the font sizes
+#: come out right on the printed page.
+FIGURE_WIDTH_PRESETS: "OrderedDictType[str, Optional[float]]" = OrderedDict([
+    ('Auto', None),
+    ('APS/IEEE 1-column (3.375 in)', 3.375),
+    ('APS/IEEE 2-column (6.9 in)', 6.9),
+    ('Nature 1-column (89 mm)', 89.0 / 25.4),
+    ('Nature 1.5-column (120 mm)', 120.0 / 25.4),
+    ('Nature 2-column (183 mm)', 183.0 / 25.4),
+])
+
+#: width used when no preset and no explicit size is given.
+DEFAULT_EXPORT_WIDTH = 3.375
+
+#: height/width ratio used to derive a height when none is given.
+DEFAULT_EXPORT_ASPECT = 0.77
+
+#: file formats we offer for export.
+EXPORT_FORMATS: Tuple[str, ...] = ('pdf', 'svg', 'eps', 'png')
+
+#: rcParams that make text in vector output survive journal submission:
+#: fonttype 42 embeds TrueType instead of Type 3 (which many publishers
+#: reject), and svg.fonttype 'none' keeps text as text rather than outlines.
+FONT_EMBEDDING_RCPARAMS: Dict[str, Any] = {
+    'pdf.fonttype': 42,
+    'ps.fonttype': 42,
+    'svg.fonttype': 'none',
+}
+
+
+@dataclass
+class ExportSpec:
+    """How to render a figure for publication.
+
+    The exported figure is drawn into a *fresh* figure of exactly this size,
+    independently of the on-screen window, so the result is reproducible.
+    """
+
+    #: figure width in inches; ``None`` means :data:`DEFAULT_EXPORT_WIDTH`.
+    width: Optional[float] = None
+    #: figure height in inches; ``None`` derives it from the width.
+    height: Optional[float] = None
+    #: resolution for raster output.
+    dpi: int = 300
+    #: output file format, one of :data:`EXPORT_FORMATS`.
+    format: str = 'pdf'
+    #: whether the background is transparent.
+    transparent: bool = False
+    #: base font size in points for the exported figure. Deliberately
+    #: independent of the screen's DPI scaling.
+    fontSize: float = 8.0
+    #: font family for the exported figure; ``None`` keeps the current one.
+    fontFamily: Optional[str] = None
+
+    def size(self) -> Tuple[float, float]:
+        """Resolve the figure size in inches."""
+        width = self.width if self.width is not None else DEFAULT_EXPORT_WIDTH
+        height = self.height if self.height is not None \
+            else width * DEFAULT_EXPORT_ASPECT
+        return width, height
+
+    def rcParams(self) -> Dict[str, Any]:
+        """rcParams to render the exported figure under."""
+        params: Dict[str, Any] = dict(FONT_EMBEDDING_RCPARAMS)
+        params['font.size'] = self.fontSize
+        params['savefig.dpi'] = self.dpi
+        params['figure.dpi'] = self.dpi
+        if self.fontFamily:
+            params['font.family'] = self.fontFamily
+        return params
+
+
+def save_figure(fig: Figure, filepath: str, spec: ExportSpec) -> None:
+    """Write `fig` to `filepath` according to `spec`.
+
+    Note that ``bbox_inches='tight'`` is deliberately *not* used: it changes
+    the final size (a 3.375 in figure comes out 3.49 in), which defeats the
+    purpose of specifying a column width. Spacing is handled by the figure's
+    constrained layout instead.
+    """
+    fig.savefig(filepath, dpi=spec.dpi, transparent=spec.transparent,
+                facecolor='none' if spec.transparent else 'white')

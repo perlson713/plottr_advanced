@@ -1,3 +1,5 @@
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 from plottr.plot.mpl.plotting import (
@@ -373,3 +375,225 @@ def test_complex_plane_figuremaker_produces_square_axes():
     assert np.isclose(x1 - x0, y1 - y0)
     assert ax.get_aspect() == 1.0
     plt.close(fig)
+
+
+# --- publication output -----------------------------------------------------
+
+import re
+
+from plottr.plot.mpl.plotting import (
+    LabelOptions,
+    TraceOptions,
+    TraceStyle,
+    ColorOptions,
+    ExportSpec,
+    apply_label_options,
+    apply_trace_options,
+    apply_color_options,
+    figure_lines,
+    FIGURE_WIDTH_PRESETS,
+    FONT_EMBEDDING_RCPARAMS,
+    SymmetricNorm,
+)
+
+
+def _pdfSizeInches(path):
+    """Physical page size of a PDF, read straight out of its MediaBox."""
+    data = open(path, 'rb').read()
+    m = re.search(rb'/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)',
+                  data)
+    x0, y0, x1, y1 = [float(v) for v in m.groups()]
+    return (x1 - x0) / 72.0, (y1 - y0) / 72.0
+
+
+def _s11AutoPlot(qtbot):
+    """An AutoPlot showing 1d complex data with error bars."""
+    from plottr.plot.mpl.autoplot import AutoPlot
+
+    x = np.linspace(12.475, 12.525, 200)
+    z = 0.5 * np.exp(2j * np.pi * np.linspace(0, 1, x.size))
+    dd = DataDict(
+        frequency=dict(values=x, unit='GHz'),
+        S11=dict(values=z, axes=['frequency']),
+        S11_error=dict(values=np.full(x.size, 0.003), axes=['frequency']),
+    )
+    dd.add_meta('errorbar', 'S11_error', data='S11')
+    dd.validate()
+
+    widget = AutoPlot()
+    qtbot.addWidget(widget)
+    widget.setData(dd)
+    return widget
+
+
+def test_export_size_is_exact_and_window_independent(qtbot, tmp_path):
+    """The core requirement: output size is set by the spec, not the window."""
+    widget = _s11AutoPlot(qtbot)
+    out = str(tmp_path / 'fig.pdf')
+
+    sizes = []
+    for w, h in [(400, 300), (1500, 900)]:
+        widget.resize(w, h)
+        assert widget.exportFigure(out, ExportSpec(width=3.375, height=2.5))
+        sizes.append(_pdfSizeInches(out))
+
+    for width, height in sizes:
+        assert np.isclose(width, 3.375, atol=1e-3)
+        assert np.isclose(height, 2.5, atol=1e-3)
+    assert sizes[0] == sizes[1]
+
+
+def test_export_embeds_truetype_not_type3(qtbot, tmp_path):
+    """Type 3 fonts are rejected by many publishers; we must embed TrueType."""
+    widget = _s11AutoPlot(qtbot)
+    out = str(tmp_path / 'fig.pdf')
+    assert widget.exportFigure(out, ExportSpec())
+
+    data = open(out, 'rb').read()
+    assert b'/Type3' not in data
+    # fonttype 42 produces a CID-keyed TrueType font with an embedded program
+    assert b'/FontFile2' in data
+    assert b'/CIDFontType2' in data
+
+
+def test_export_font_size_is_monitor_independent(qtbot, tmp_path):
+    """Screen DPI scaling must not leak into the exported figure."""
+    from matplotlib import rcParams
+
+    widget = _s11AutoPlot(qtbot)
+    out = str(tmp_path / 'fig.pdf')
+
+    before = rcParams['font.size']
+    rcParams['font.size'] = before * 2          # pretend we moved to HiDPI
+    try:
+        assert widget.exportFigure(out, ExportSpec(width=3.375, fontSize=8.0))
+        scaled = _pdfSizeInches(out)
+    finally:
+        rcParams['font.size'] = before
+
+    assert widget.exportFigure(out, ExportSpec(width=3.375, fontSize=8.0))
+    assert scaled == _pdfSizeInches(out)
+
+
+def test_export_spec_size_presets_and_defaults():
+    assert ExportSpec().size()[0] == 3.375           # sensible auto default
+    assert FIGURE_WIDTH_PRESETS['Auto'] is None
+    assert np.isclose(FIGURE_WIDTH_PRESETS['Nature 1-column (89 mm)'],
+                      89.0 / 25.4)
+    # an explicit height is respected, otherwise derived from the width
+    assert ExportSpec(width=6.9, height=2.0).size() == (6.9, 2.0)
+    assert ExportSpec(width=4.0).size()[1] < 4.0
+
+    rc = ExportSpec().rcParams()
+    for k, v in FONT_EMBEDDING_RCPARAMS.items():
+        assert rc[k] == v
+
+
+def test_publication_option_defaults_are_noop():
+    fig = plt.figure()
+    ax = fig.add_subplot()
+    ax.plot([0, 1], [0, 1], label='a')
+    ax.set_xlabel('x')
+
+    apply_label_options(fig, LabelOptions())
+    apply_trace_options(fig, TraceOptions(markerLimit=None))
+    apply_color_options(fig, ColorOptions())
+
+    assert ax.get_xlabel() == 'x'
+    assert ax.get_legend() is None
+    plt.close(fig)
+
+
+def test_label_options_override_text_and_legend():
+    fig = plt.figure()
+    ax = fig.add_subplot()
+    ax.plot([0, 1], [0, 1], label='raw name')
+    ax.set_xlabel('frequency (Hz)')
+
+    apply_label_options(fig, LabelOptions(
+        xlabel='Frequency (GHz)', ylabel='|S11| (dB)',
+        showLegend=True, legendLocation='lower left', legendFrame=False))
+
+    assert ax.get_xlabel() == 'Frequency (GHz)'
+    assert ax.get_ylabel() == '|S11| (dB)'
+    legend = ax.get_legend()
+    assert legend is not None and not legend.get_frame_on()
+
+    apply_label_options(fig, LabelOptions(showLegend=False))
+    assert ax.get_legend() is None
+    plt.close(fig)
+
+
+def test_trace_options_style_and_marker_limit():
+    fig = plt.figure()
+    ax = fig.add_subplot()
+    ax.plot(np.arange(500), np.arange(500), marker='o', label='dense')
+    ax.plot([0, 1], [1, 0], marker='o', label='sparse')
+
+    apply_trace_options(fig, TraceOptions(
+        styles={0: TraceStyle(color='#ff0000', linestyle='--', linewidth=2.0)},
+        markerLimit=200))
+
+    dense, sparse = figure_lines(fig)
+    assert dense.get_marker() == ''             # too many points for markers
+    assert sparse.get_marker() == 'o'           # short trace keeps them
+    assert dense.get_linestyle() == '--'
+    assert np.isclose(dense.get_linewidth(), 2.0)
+    plt.close(fig)
+
+
+def test_figure_lines_excludes_errorbar_helpers():
+    fig = plt.figure()
+    ax = fig.add_subplot()
+    x = np.arange(5.0)
+    line, = ax.plot(x, x, label='data')
+    ax.errorbar(x, x, yerr=np.full(5, 0.1), fmt='none')
+
+    assert figure_lines(fig) == [line]
+    plt.close(fig)
+
+
+def test_color_options_colormap_limits_and_symmetric():
+    fig = plt.figure()
+    ax = fig.add_subplot()
+    im = ax.imshow(np.random.rand(4, 4))
+
+    apply_color_options(fig, ColorOptions(colormap='viridis',
+                                          vmin=-1.0, vmax=2.0))
+    assert im.get_cmap().name == 'viridis'
+    assert im.get_clim() == (-1.0, 2.0)
+
+    apply_color_options(fig, ColorOptions(symmetric=True, vmin=-1.0, vmax=3.0))
+    assert isinstance(im.norm, SymmetricNorm)
+    plt.close(fig)
+
+
+def test_axes_options_tick_controls():
+    from plottr.plot.mpl.plotting import apply_axes_options
+
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    apply_axes_options(ax, AxesOptions(minorTicks=True, tickDirection='in',
+                                       ticksAllSides=True))
+    assert len(ax.xaxis.get_minorticklocs()) > 0
+    plt.close(fig)
+
+
+def test_default_title_is_basename_not_full_path(qtbot):
+    widget = _s11AutoPlot(qtbot)
+    widget.data.add_meta('title', '/home/someone/data/2026-01-01/run.ddh5')
+    assert widget.defaultTitle() == 'run.ddh5'
+    assert '/' not in widget.defaultTitle()
+
+
+def test_mplstyle_hook_is_implemented():
+    """The style hook the module docstring advertises must actually exist."""
+    import plottr.plot.mpl as mplmod
+
+    assert callable(mplmod.applyDefaultStyle)
+    mplmod.applyDefaultStyle()          # must not raise when no file is present
+
+    assert os.path.exists(mplmod.PUBLICATION_STYLE_FILE)
+    mplmod.applyPublicationStyle()
+    from matplotlib import rcParams
+    assert rcParams['pdf.fonttype'] == 42

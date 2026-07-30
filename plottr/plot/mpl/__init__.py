@@ -40,6 +40,7 @@ directories and applies it to matplotlib plots using `pyplot.style.use`.
 
 """
 import logging
+import os
 
 from matplotlib import rcParams, colormaps, pyplot as plt
 
@@ -49,4 +50,42 @@ from .widgets import MPLPlot, MPLPlotWidget
 
 
 logger = logging.getLogger(__name__)
+
+#: name of the style file looked for in the plottr config directories.
+DEFAULT_STYLE_FILE = 'plottr_default.mplstyle'
+
+#: style shipped with plottr that produces publication-ready figures.
+PUBLICATION_STYLE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'styles', 'publication.mplstyle')
+
+
+def applyDefaultStyle() -> None:
+    """Apply the user's default matplotlib style, if they have one.
+
+    Looks for :data:`DEFAULT_STYLE_FILE` in the plottr config directories and
+    applies the files found, in order of increasing priority. Missing or
+    broken style files are logged and skipped rather than raised, so a bad
+    style can never stop plottr from starting.
+    """
+    for filepath in configFiles(DEFAULT_STYLE_FILE):
+        try:
+            plt.style.use(filepath)
+            logger.debug(f"Applied matplotlib style from {filepath}.")
+        except Exception as e:
+            logger.warning(f"Could not apply style file {filepath}: {e}")
+
+
+def applyPublicationStyle() -> None:
+    """Apply the publication style shipped with plottr.
+
+    Sets serif fonts, inward ticks and TrueType font embedding -- the settings
+    most journals expect. Intended to be applied on top of the defaults.
+    """
+    try:
+        plt.style.use(PUBLICATION_STYLE_FILE)
+    except Exception as e:
+        logger.warning(f"Could not apply the publication style: {e}")
+
+
+applyDefaultStyle()
 
