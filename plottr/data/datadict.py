@@ -70,6 +70,76 @@ def meta_name_to_key(name: str) -> str:
 T = TypeVar('T', bound='DataDictBase')
 
 
+#: meta names under which a dependent may declare the field that holds its
+#: error bars, e.g. ``__errorbar__ = 'signal_std'``.
+ERROR_BAR_META_KEYS = ('errorbar', 'error_bar', 'yerr', 'y_error', 'error')
+
+
+def errorBarDataName(data: 'DataDictBase', dependent: str) -> Optional[str]:
+    """Return the field containing y error bars for a dependent, if present.
+
+    Looked up first through the dependent's meta data (see
+    :data:`ERROR_BAR_META_KEYS`), then through common naming conventions.
+
+    :param data: the data object to inspect.
+    :param dependent: name of the dependent whose error field we want.
+    :return: name of the error field, or ``None`` if there is none.
+    """
+    if dependent not in data:
+        return None
+
+    for meta_name in ERROR_BAR_META_KEYS:
+        meta_key = data._meta_name_to_key(meta_name)
+        candidate = data[dependent].get(meta_key, None)
+        if isinstance(candidate, str) and candidate in data:
+            return candidate
+
+    candidates = (
+        f'{dependent}_err',
+        f'{dependent}_error',
+        f'{dependent}_yerr',
+        f'err_{dependent}',
+        f'error_{dependent}',
+    )
+    for candidate in candidates:
+        if candidate in data:
+            return candidate
+    return None
+
+
+def errorBarData(data: 'DataDictBase', dependent: str) -> Optional[np.ndarray]:
+    """Return y error-bar values associated with a dependent, if present.
+
+    :param data: the data object to inspect.
+    :param dependent: name of the dependent whose errors we want.
+    :return: the error values, or ``None`` if absent or shape-incompatible.
+    """
+    error_name = errorBarDataName(data, dependent)
+    if error_name is None:
+        return None
+
+    error_values = np.asanyarray(data.data_vals(error_name))
+    dependent_values = np.asanyarray(data.data_vals(dependent))
+    if error_values.shape != dependent_values.shape:
+        return None
+    return error_values
+
+
+def plottableDependents(data: 'DataDictBase') -> List[str]:
+    """Return dependents excluding fields that are referenced as error bars.
+
+    :param data: the data object to inspect.
+    :return: names of the dependents that should be plotted as their own trace.
+    """
+    error_names = set()
+    dependents = data.dependents()
+    for dependent in dependents:
+        error_name = errorBarDataName(data, dependent)
+        if error_name is not None:
+            error_names.add(error_name)
+    return [dependent for dependent in dependents if dependent not in error_names]
+
+
 class GriddingError(ValueError):
     pass
 

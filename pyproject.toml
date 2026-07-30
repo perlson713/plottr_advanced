@@ -63,6 +63,7 @@ include-package-data = false
 [tool.setuptools.package-data]
 plottr = [
     "resource/gfx/*",
+    "plot/mpl/styles/*.mplstyle",
     "py.typed",
 ]
 

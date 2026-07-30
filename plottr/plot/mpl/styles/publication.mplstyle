@@ -1,0 +1,61 @@
+# Publication-oriented matplotlib style for plottr.
+#
+# Aimed at journal figures: embedded TrueType fonts (Type 3 is rejected by
+# many publishers), serif text, inward ticks on all four sides, and thin
+# lines that survive being scaled down to one column width.
+#
+# Apply with plottr.plot.mpl.applyPublicationStyle(), or copy this file to a
+# plottr config directory as plottr_default.mplstyle to make it the default.
+
+# --- font embedding (required by most publishers) ---
+pdf.fonttype:        42
+ps.fonttype:         42
+svg.fonttype:        none
+
+# --- fonts ---
+font.family:         serif
+font.serif:          DejaVu Serif, Times New Roman, Times, Computer Modern Roman
+font.size:           8
+axes.labelsize:      8
+axes.titlesize:      8
+xtick.labelsize:     7
+ytick.labelsize:     7
+legend.fontsize:     7
+mathtext.fontset:    dejavuserif
+
+# --- axes ---
+axes.linewidth:      0.6
+axes.grid:           False
+axes.formatter.use_mathtext: True
+axes.unicode_minus:  True
+
+# --- ticks: inward, on all four sides ---
+xtick.direction:     in
+ytick.direction:     in
+xtick.top:           True
+ytick.right:         True
+xtick.major.width:   0.6
+ytick.major.width:   0.6
+xtick.minor.width:   0.4
+ytick.minor.width:   0.4
+xtick.major.size:    3.0
+ytick.major.size:    3.0
+xtick.minor.size:    1.5
+ytick.minor.size:    1.5
+xtick.minor.visible: True
+ytick.minor.visible: True
+
+# --- lines: thin, no markers (dense sweeps blob up in print) ---
+lines.linewidth:     1.0
+lines.markersize:    2.5
+lines.marker:        None
+
+# --- legend ---
+legend.frameon:      False
+legend.handlelength: 1.5
+
+# --- output ---
+figure.dpi:          300
+savefig.dpi:         300
+savefig.transparent: False
+image.cmap:          viridis

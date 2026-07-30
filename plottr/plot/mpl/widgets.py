@@ -3,6 +3,7 @@
 """
 
 import io
+import os
 from typing import Tuple, Optional, List, Dict
 
 from matplotlib import rcParams
@@ -72,7 +73,14 @@ class MPLPlot(FCanvas):
         self.autosize()
 
     def setRcParams(self) -> None:
-        """apply matplotlibrc config from plottr configuration files."""
+        """apply matplotlibrc config from plottr configuration files.
+
+        The font size is scaled by the screen's DPI factor so that the plot
+        stays readable on high-DPI monitors. Note that this scaling is a
+        *display* concern only -- exporting renders under its own rcParams
+        (see :meth:`.autoplot.AutoPlot.exportFigure`) so that saved figures
+        are identical regardless of the monitor they were produced on.
+        """
         cfg = plottrconfig().get('main', {}).get('matplotlibrc', {})
         for k, v in cfg.items():
             rcParams[k] = v
@@ -110,8 +118,10 @@ class MPLPlot(FCanvas):
         Copy the current canvas to the clipboard.
         """
         buf = io.BytesIO()
+        # note: transparent=True would override facecolor, leaving a
+        # transparent background that pastes as black in most applications.
         self.fig.savefig(buf, dpi=300, facecolor='w', format='png',
-                         transparent=True)
+                         transparent=False)
 
         clipboard = QtWidgets.QApplication.clipboard()
         clipboard.setImage(QtGui.QImage.fromData(buf.getvalue()))
@@ -146,6 +156,11 @@ class MPLPlotWidget(PlotWidget):
     Per default, add a canvas and the matplotlib NavBar.
     """
 
+    #: whether to draw the data's ``title`` meta field on the figure. Off by
+    #: default because it holds the full file path, which is unsuitable for
+    #: publication; :class:`.plotting.LabelOptions` offers a proper title.
+    showMetaTitle = False
+
     def __init__(self, parent: Optional[PlotWidgetContainer] = None):
         super().__init__(parent=parent)
 
@@ -170,8 +185,13 @@ class MPLPlotWidget(PlotWidget):
             if meta field ``title`` or ``info`` are in the data object, then
             they will be added as text info to the figure.
         """
-        if data.has_meta('title'):
-            self.plot.setFigureTitle(data.meta_val('title'))
+        # The loaders put the full file path into the 'title' meta field, which
+        # is not something anyone wants printed on a figure. Titles are now
+        # drawn by the plot code itself (see AutoPlot.defaultTitle and
+        # LabelOptions.showTitle), so nothing is set here by default.
+        if self.showMetaTitle and data.has_meta('title'):
+            self.plot.setFigureTitle(
+                os.path.basename(str(data.meta_val('title'))))
 
         if data.has_meta('info'):
             self.plot.setFigureInfo(data.meta_val('info'))

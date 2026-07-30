@@ -28,6 +28,12 @@ config = {
         'lines.linewidth': 1,
         'savefig.dpi': 300,
         'savefig.transparent': False,
+        # embed TrueType rather than Type 3 fonts: many publishers reject
+        # Type 3, which is matplotlib's default. 'none' for svg keeps text
+        # as text instead of converting it to outlines.
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+        'svg.fonttype': 'none',
     },
 
     'pyqtgraph': {

@@ -7,7 +7,7 @@ from typing import List, Tuple, Dict, Any, Sequence, Optional
 
 
 from .node import Node, NodeWidget, updateOption
-from ..data.datadict import DataDictBase, DataDict
+from ..data.datadict import DataDictBase, DataDict, errorBarDataName
 from ..gui.data_display import DataSelectionWidget
 from plottr.icons import get_dataColumnsIcon
 from ..utils import num
@@ -83,6 +83,11 @@ class DataSelector(Node):
 
     force_numerical_data = True
 
+    #: if True, a field that a selected dependent references as its error bars
+    #: is kept as well, even when it is not selected explicitly. Without this,
+    #: selecting only the dependent would silently discard its error bars.
+    include_error_bars = True
+
     def __init__(self, name: str):
         super().__init__(name)
 
@@ -142,6 +147,22 @@ class DataSelector(Node):
             dnames = self.selectedData
         if len(self.selectedData) == 0:
             return None
+
+        dnames = list(dnames)
+        if self.include_error_bars:
+            for n in list(dnames):
+                err = errorBarDataName(data, n)
+                if err is None or err in dnames:
+                    continue
+                # only take it along if it is structurally compatible -- an
+                # extra dependent on different axes would break the
+                # compatibility guarantee this node is supposed to provide.
+                if data.axes(err) != data.axes(n):
+                    self.node_logger.warning(
+                        f'Error-bar field {err} of {n} has incompatible axes; '
+                        f'not including it.')
+                    continue
+                dnames.append(err)
 
         ret = data.extract(dnames)
         if self.force_numerical_data:

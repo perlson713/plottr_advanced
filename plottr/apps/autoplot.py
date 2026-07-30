@@ -10,7 +10,7 @@ from typing import Union, Tuple, Optional, Type, List, Any, Type
 from packaging import version
 
 from .. import QtCore, Flowchart, Signal, Slot, QtWidgets, QtGui
-from ..data.datadict import DataDictBase
+from ..data.datadict import DataDictBase, plottableDependents
 from ..data.datadict_storage import DDH5Loader
 from ..data.qcodes_dataset import QCodesDSLoader
 from ..gui import PlotWindow
@@ -235,7 +235,9 @@ class AutoPlotMainWindow(PlotWindow):
         """
         try to set some reasonable defaults so there's a plot right away.
         """
-        selected = data.dependents()
+        # error-bar fields are dependents too, but plotting one as its own
+        # trace is never what we want as a default.
+        selected = plottableDependents(data)
         if len(selected) > 0:
             selected = selected[:1]
 
@@ -347,6 +349,7 @@ def autoplotDDH5(filepath: str = '',
         ('Grid', DataGridder),
         ('Histogram', Histogrammer),
         ('Dimension assignment', XYSelector),
+        ('Scale units', ScaleUnits),
         ('plot', PlotNode)
     )
 

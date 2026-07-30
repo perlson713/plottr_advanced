@@ -23,7 +23,8 @@ from plottr.data.datadict import DataDictBase
 from .plots import Plot, PlotWithColorbar, PlotBase
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, \
-    PlotWidgetContainer, PlotWidget, errorBarData, plottableDependents
+    PlotWidgetContainer, PlotWidget, errorBarData, plottableDependents, \
+    ERROR_BAR_KEY, ERROR_BAR_X_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -185,14 +186,10 @@ class FigureMaker(BaseFM):
             elif len(plotItem.data) == 3:
                 plotItem.plotDataType = PlotDataType.scatter2d
         
-        #If the Complex Representation is LogMag
-        if self.complexRepresentation == ComplexRepresentation.log_MagAndPhase:
+        # note: the dB conversion for ComplexRepresentation.log_MagAndPhase is
+        # done once, backend-agnostically, in AutoFigureMaker._splitComplexData.
+        # Applying it again here would double-log the data.
 
-            #Switch the 1d plots to the logarithmic variation if the plot is the Magnitude plot (not the Phase Plot)
-            if plotItem.subPlot == 0:
-                if plotItem.plotDataType == PlotDataType.scatter1d: plotItem.plotDataType = PlotDataType.log10_scatter1d
-                if plotItem.plotDataType == PlotDataType.line1d: plotItem.plotDataType = PlotDataType.log10_line1d
-        
         if plotItem.plotDataType in [PlotDataType.scatter1d, PlotDataType.line1d,PlotDataType.log10_line1d,PlotDataType.log10_scatter1d]:
             self._1dPlot(plotItem)
         elif plotItem.plotDataType == PlotDataType.grid2d:
@@ -223,14 +220,14 @@ class FigureMaker(BaseFM):
         #flatten and apply data transformations (if applicable)
         x = x.flatten()
         assert plotItem.plotOptions is not None
-        yerr = plotItem.plotOptions.get('_errorBarData', None)
+        yerr = plotItem.plotOptions.get(ERROR_BAR_KEY, None)
         if yerr is not None:
             yerr = yerr.flatten()
+        xerr = plotItem.plotOptions.get(ERROR_BAR_X_KEY, None)
+        if xerr is not None:
+            xerr = xerr.flatten()
 
-        if plotItem.plotDataType in [PlotDataType.log10_line1d, PlotDataType.log10_scatter1d]:
-            y = 20*np.log(y.flatten())
-        else:
-            y = y.flatten()
+        y = y.flatten()
 
         #plot either line or scatter depending on what graph is being requested
         if plotItem.plotDataType in [PlotDataType.line1d, PlotDataType.log10_line1d]:
@@ -242,8 +239,9 @@ class FigureMaker(BaseFM):
                                       pen=None, symbol=symbol, symbolBrush=color,
                                       symbolPen=None, symbolSize=symbolSize)
 
-        if yerr is not None:
+        if yerr is not None or xerr is not None:
             errorBars = ErrorBarItem(x=x, y=y, top=yerr, bottom=yerr,
+                                     left=xerr, right=xerr,
                                      beam=0.5, pen=mkPen(color, width=1))
             subPlot.plot.addItem(errorBars)
         return curve
@@ -318,6 +316,8 @@ class AutoPlot(PlotWidget):
 
             fm.complexRepresentation = self.figOptions.complexRepresentation
             fm.combineTraces = self.figOptions.combineLinePlots
+            fm.phaseDegrees = self.figOptions.phaseDegrees
+            fm.phaseUnwrap = self.figOptions.phaseUnwrap
 
             for dep in plottableDependents(self.data):
                 inds = self.data.axes(dep)
@@ -326,7 +326,7 @@ class AutoPlot(PlotWidget):
                 plotOptions = {}
                 yerr = errorBarData(self.data, dep) if self.figOptions.showErrorBars else None
                 if yerr is not None:
-                    plotOptions['_errorBarData'] = yerr
+                    plotOptions[ERROR_BAR_KEY] = yerr
                 plotId = fm.addData(
                     *[np.asanyarray(self.data.data_vals(n)) for n in inds] + [dvals],
                     labels=[str(self.data.label(n)) for n in inds] + [str(self.data.label(dep))],
@@ -419,6 +419,12 @@ class FigureOptions:
 
     #: how to represent complex data
     complexRepresentation: ComplexRepresentation = ComplexRepresentation.realAndImag
+
+    #: whether to show phase in degrees instead of radians
+    phaseDegrees: bool = False
+
+    #: whether to unwrap the phase before display
+    phaseUnwrap: bool = False
 
     #: The number of independent axes that are passed
     numAxes: int = 0
