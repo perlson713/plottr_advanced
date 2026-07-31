@@ -21,7 +21,8 @@ from .plotting import PlotType, colorplot2d
 from .widgets import MPLPlotWidget
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, PlotWidgetContainer, \
-    errorBarData, plottableDependents
+    ERROR_BAR_AUTO, ERROR_BAR_NONE, errorBarData, errorBarDataNames, \
+    plottableDependents
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
     #: signal emitted when error-bar visibility has been changed
     errorBarsSelected = Signal(bool)
 
+    #: signal emitted when an error-bar source has been selected
+    errorBarSourceSelected = Signal(str, str)
+
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
 
@@ -237,6 +241,15 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.showErrorBars.triggered.connect(
             lambda: self.errorBarsSelected.emit(self.showErrorBars.isChecked()))
 
+        self.errorBarMenu = QtWidgets.QMenu(parent=self)
+        self.errorBarButton = QtWidgets.QToolButton()
+        self.errorBarButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.errorBarButton.setText('Error source')
+        self.errorBarButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.errorBarButton.setMenu(self.errorBarMenu)
+        self.addWidget(self.errorBarButton)
+        self._errorBarMenuRefs: List[Any] = []
+
         self.plotTypeActions = OrderedDict({
             PlotType.multitraces: self.plotasMultiTraces,
             PlotType.singletraces: self.plotasSingleTraces,
@@ -259,6 +272,57 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self._currentComplex = ComplexRepresentation.realAndImag
         self.ComplexActions[self._currentComplex].setChecked(True)
         self._currentlyAllowedComplexTypes: Tuple[ComplexRepresentation, ...] = ()
+
+    def setErrorBarOptions(
+        self, data: Optional[DataDictBase], sources: Optional[Dict[str, str]] = None
+    ) -> None:
+        """Populate the error-bar source menu from the current dataset."""
+        self.errorBarMenu.clear()
+        self._errorBarMenuRefs = []
+        self.errorBarButton.setEnabled(data is not None)
+        if data is None:
+            return
+
+        if sources is None:
+            sources = {}
+
+        dependents = plottableDependents(data, sources)
+        if len(dependents) == 0:
+            noData = self.errorBarMenu.addAction('No plottable dependents')
+            noData.setEnabled(False)
+            return
+
+        for dependent in dependents:
+            current = sources.get(dependent, ERROR_BAR_AUTO)
+            depMenu = QtWidgets.QMenu(dependent, self.errorBarMenu)
+            self.errorBarMenu.addMenu(depMenu)
+            group = QtWidgets.QActionGroup(depMenu)
+            group.setExclusive(True)
+            self._errorBarMenuRefs.extend([depMenu, group])
+
+            for label, source in [('Auto', ERROR_BAR_AUTO), ('None', ERROR_BAR_NONE)]:
+                action = depMenu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(current == source)
+                group.addAction(action)
+                action.triggered.connect(
+                    lambda _checked=False, dep=dependent, src=source:
+                        self.errorBarSourceSelected.emit(dep, src)
+                )
+
+            candidates = errorBarDataNames(data, dependent)
+            if len(candidates) > 0:
+                depMenu.addSeparator()
+
+            for candidate in candidates:
+                action = depMenu.addAction(candidate)
+                action.setCheckable(True)
+                action.setChecked(current == candidate)
+                group.addAction(action)
+                action.triggered.connect(
+                    lambda _checked=False, dep=dependent, src=candidate:
+                        self.errorBarSourceSelected.emit(dep, src)
+                )
 
     def selectPlotType(self, plotType: PlotType) -> None:
         """makes sure that the selected `plotType` is active (checked), all
@@ -381,6 +445,7 @@ class AutoPlot(MPLPlotWidget):
         # The default complex behavior is set here.
         self.complexRepresentation = ComplexRepresentation.realAndImag
         self.showErrorBars = True
+        self.errorBarSources: Dict[str, str] = {}
 
         # A toolbar for configuring the plot
         self.plotOptionsToolBar = AutoPlotToolBar('Plot options', self)
@@ -395,6 +460,9 @@ class AutoPlot(MPLPlotWidget):
         )
         self.plotOptionsToolBar.errorBarsSelected.connect(
             self._errorBarsPreferenceFromToolBar
+        )
+        self.plotOptionsToolBar.errorBarSourceSelected.connect(
+            self._errorBarSourceFromToolBar
         )
 
         scaling = dpiScalingFactor(self)
@@ -415,6 +483,7 @@ class AutoPlot(MPLPlotWidget):
         self.plotDataType = determinePlotDataType(data)
         self._processPlotTypeOptions()
         self._processComplexTypeOptions()
+        self._processErrorBarOptions()
         self._plotData()
 
     def _processPlotTypeOptions(self) -> None:
@@ -472,6 +541,26 @@ class AutoPlot(MPLPlotWidget):
             self.showErrorBars = showErrorBars
             self._plotData()
 
+    @Slot(str, str)
+    def _errorBarSourceFromToolBar(self, dependent: str, source: str) -> None:
+        if self.errorBarSources.get(dependent, ERROR_BAR_AUTO) != source:
+            self.errorBarSources[dependent] = source
+            self._processErrorBarOptions()
+            self._plotData()
+
+    def _processErrorBarOptions(self) -> None:
+        if self.data is None:
+            self.errorBarSources = {}
+            self.plotOptionsToolBar.setErrorBarOptions(None, self.errorBarSources)
+            return
+
+        self.errorBarSources = {
+            name: source
+            for name, source in self.errorBarSources.items()
+            if name in self.data
+        }
+        self.plotOptionsToolBar.setErrorBarOptions(self.data, self.errorBarSources)
+
     def _plotData(self) -> None:
         """Plot the data using previously determined data and plot types."""
 
@@ -484,7 +573,6 @@ class AutoPlot(MPLPlotWidget):
 
         assert self.data is not None
 
-        kw: Dict[str, Any] = {}
         with FigureMaker(self.plot.fig) as fm:
             fm.plotType = self.plotType
             if not self.dataIsComplex():
@@ -493,13 +581,13 @@ class AutoPlot(MPLPlotWidget):
                 fm.complexRepresentation = self.complexRepresentation
 
             indeps = self.data.axes()
-            for dn in plottableDependents(self.data):
+            for dn in plottableDependents(self.data, self.errorBarSources):
                 dvals = self.data.data_vals(dn)
-                yerr = errorBarData(self.data, dn) if self.showErrorBars else None
+                source = self.errorBarSources.get(dn, ERROR_BAR_AUTO)
+                yerr = errorBarData(self.data, dn, source) if self.showErrorBars else None
+                kw: Dict[str, Any] = {}
                 if yerr is not None:
                     kw['_errorBarData'] = yerr
-                else:
-                    kw.pop('_errorBarData', None)
                 plotId = fm.addData(
                     *[np.asanyarray(self.data.data_vals(n)) for n in indeps] + [dvals],
                     labels=[str(self.data.label(n)) for n in indeps] + [str(self.data.label(dn))],

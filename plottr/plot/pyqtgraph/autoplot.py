@@ -11,8 +11,8 @@ object for plotting data automatically using ``pyqtgraph``.
 import logging
 from pathlib import Path
 import time
-from dataclasses import dataclass
-from typing import List, Optional, Any
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 from pyqtgraph import ErrorBarItem, mkPen
@@ -23,7 +23,8 @@ from plottr.data.datadict import DataDictBase
 from .plots import Plot, PlotWithColorbar, PlotBase
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, \
-    PlotWidgetContainer, PlotWidget, errorBarData, plottableDependents
+    PlotWidgetContainer, PlotWidget, ERROR_BAR_AUTO, ERROR_BAR_NONE, \
+    errorBarData, errorBarDataNames, plottableDependents
 
 logger = logging.getLogger(__name__)
 
@@ -319,12 +320,13 @@ class AutoPlot(PlotWidget):
             fm.complexRepresentation = self.figOptions.complexRepresentation
             fm.combineTraces = self.figOptions.combineLinePlots
 
-            for dep in plottableDependents(self.data):
+            for dep in plottableDependents(self.data, self.figOptions.errorBarSources):
                 inds = self.data.axes(dep)
                 dvals = self.data.data_vals(dep)
                 pdt = determinePlotDataType(self.data.extract([dep]))
                 plotOptions = {}
-                yerr = errorBarData(self.data, dep) if self.figOptions.showErrorBars else None
+                source = self.figOptions.errorBarSources.get(dep, ERROR_BAR_AUTO)
+                yerr = errorBarData(self.data, dep, source) if self.figOptions.showErrorBars else None
                 if yerr is not None:
                     plotOptions['_errorBarData'] = yerr
                 plotId = fm.addData(
@@ -366,6 +368,12 @@ class AutoPlot(PlotWidget):
         assert self.figConfig is not None
         assert self.figConfig.updateComplexButton() is not None
 
+        self.figOptions.errorBarSources = {
+            name: source
+            for name, source in self.figOptions.errorBarSources.items()
+            if name in self.data
+        }
+        self.figConfig.updateErrorBarButton(self.data)
         self.figConfig.updateComplexButton()
 
     @Slot()
@@ -417,6 +425,9 @@ class FigureOptions:
     #: whether to show y error bars when the data provides them
     showErrorBars: bool = True
 
+    #: selected y error-bar source for each dependent
+    errorBarSources: Dict[str, str] = field(default_factory=dict)
+
     #: how to represent complex data
     complexRepresentation: ComplexRepresentation = ComplexRepresentation.realAndImag
 
@@ -467,19 +478,32 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
             lambda: self._setOption('showErrorBars',
                                     showErrorBars.isChecked())
         )
-        complexOptions = QtWidgets.QMenu(parent=self)
-        complexGroup = QtWidgets.QActionGroup(complexOptions)
-        complexGroup.setExclusive(True)
-        self._createComplexRepresentation()
-        
+
+        self.errorBarMenu = QtWidgets.QMenu(parent=self)
+        self.errorBarButton = QtWidgets.QToolButton()
+        self.errorBarButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.errorBarButton.setText('Error source')
+        self.errorBarButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.errorBarButton.setMenu(self.errorBarMenu)
+        self.errorBarAction = self.addWidget(self.errorBarButton)
+        self._errorBarMenuRefs: List[Any] = []
+
         # Adding functionality to copy and save the graph
         self.copyFig = self.addAction('Copy Figure', self._copyFig)
         self.saveFig = self.addAction('Save Figure', self._saveFig)
+
+        self.complexAction: Optional[QtWidgets.QAction] = None
+        self._createComplexRepresentation()
 
 
     def _setOption(self, option: str, value: Any) -> None:
         setattr(self.options, option, value)
         self.optionsChanged.emit()
+
+    def _setErrorBarSource(self, dependent: str, source: str) -> None:
+        if self.options.errorBarSources.get(dependent, ERROR_BAR_AUTO) != source:
+            self.options.errorBarSources[dependent] = source
+            self.optionsChanged.emit()
         
     def _copyFig(self) -> None:
         self.figCopied.emit()
@@ -489,6 +513,10 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
 
     def _createComplexRepresentation(self) -> bool:
         #constructs/reconstructs the Complex Button with different viewing options based upon input data
+
+        if self.complexAction is not None:
+            self.removeAction(self.complexAction)
+            self.complexAction = None
 
         complexOptions = QtWidgets.QMenu(parent=self)
         complexGroup = QtWidgets.QActionGroup(complexOptions)
@@ -515,15 +543,57 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
         complexButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         complexButton.setMenu(complexOptions)
 
-        # Keep the dynamic complex menu after the fixed toggle actions.
-        if len(self.actions()) == 2:
-            self.addWidget(complexButton)
-        else:
-            self.insertAction(self.actions()[2],self.addWidget(complexButton))
+        # Keep the dynamic complex menu after the fixed error-bar controls.
+        self.complexAction = self.insertWidget(self.copyFig, complexButton)
         return True
 
     def updateComplexButton(self) -> bool:
-        # Remove the action currently corresponding to the complex menu.
-        self.removeAction(self.actions()[2])
         self._createComplexRepresentation()
+        return True
+
+    def updateErrorBarButton(self, data: Optional[DataDictBase]) -> bool:
+        """Populate the error-bar source menu from the current dataset."""
+        self.errorBarMenu.clear()
+        self._errorBarMenuRefs = []
+        self.errorBarButton.setEnabled(data is not None)
+        if data is None:
+            return True
+
+        dependents = plottableDependents(data, self.options.errorBarSources)
+        if len(dependents) == 0:
+            noData = self.errorBarMenu.addAction('No plottable dependents')
+            noData.setEnabled(False)
+            return True
+
+        for dependent in dependents:
+            current = self.options.errorBarSources.get(dependent, ERROR_BAR_AUTO)
+            depMenu = QtWidgets.QMenu(dependent, self.errorBarMenu)
+            self.errorBarMenu.addMenu(depMenu)
+            group = QtWidgets.QActionGroup(depMenu)
+            group.setExclusive(True)
+            self._errorBarMenuRefs.extend([depMenu, group])
+
+            for label, source in [('Auto', ERROR_BAR_AUTO), ('None', ERROR_BAR_NONE)]:
+                action = depMenu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(current == source)
+                group.addAction(action)
+                action.triggered.connect(
+                    lambda _checked=False, dep=dependent, src=source:
+                        self._setErrorBarSource(dep, src)
+                )
+
+            candidates = errorBarDataNames(data, dependent)
+            if len(candidates) > 0:
+                depMenu.addSeparator()
+
+            for candidate in candidates:
+                action = depMenu.addAction(candidate)
+                action.setCheckable(True)
+                action.setChecked(current == candidate)
+                group.addAction(action)
+                action.triggered.connect(
+                    lambda _checked=False, dep=dependent, src=candidate:
+                        self._setErrorBarSource(dep, src)
+                )
         return True

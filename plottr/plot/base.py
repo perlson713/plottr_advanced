@@ -278,17 +278,29 @@ class ComplexRepresentation(LabeledOptions):
 
 
 ERROR_BAR_META_KEYS = ('errorbar', 'error_bar', 'yerr', 'y_error', 'error')
+ERROR_BAR_AUTO = '__plottr_errorbar_auto__'
+ERROR_BAR_NONE = '__plottr_errorbar_none__'
 
 
-def errorBarDataName(data: DataDictBase, dependent: str) -> Optional[str]:
+def errorBarDataName(
+    data: DataDictBase, dependent: str, source: Optional[str] = ERROR_BAR_AUTO
+) -> Optional[str]:
     """Return the field containing y error bars for a dependent, if present."""
     if dependent not in data:
+        return None
+
+    if source == ERROR_BAR_NONE:
+        return None
+
+    if source not in (None, ERROR_BAR_AUTO):
+        if source in errorBarDataNames(data, dependent):
+            return source
         return None
 
     for meta_name in ERROR_BAR_META_KEYS:
         meta_key = data._meta_name_to_key(meta_name)
         candidate = data[dependent].get(meta_key, None)
-        if isinstance(candidate, str) and candidate in data:
+        if isinstance(candidate, str) and candidate in errorBarDataNames(data, dependent):
             return candidate
 
     candidates = (
@@ -299,14 +311,35 @@ def errorBarDataName(data: DataDictBase, dependent: str) -> Optional[str]:
         f'error_{dependent}',
     )
     for candidate in candidates:
-        if candidate in data:
+        if candidate in errorBarDataNames(data, dependent):
             return candidate
     return None
 
 
-def errorBarData(data: DataDictBase, dependent: str) -> Optional[np.ndarray]:
+def errorBarDataNames(data: DataDictBase, dependent: str) -> List[str]:
+    """Return fields that can be used as y error bars for a dependent."""
+    if dependent not in data:
+        return []
+
+    dependent_values = np.asanyarray(data.data_vals(dependent))
+    dependent_axes = data.axes(dependent)
+    candidates = []
+    for name, _ in data.data_items():
+        if name == dependent:
+            continue
+        if data.axes(name) != dependent_axes:
+            continue
+        if np.asanyarray(data.data_vals(name)).shape != dependent_values.shape:
+            continue
+        candidates.append(name)
+    return candidates
+
+
+def errorBarData(
+    data: DataDictBase, dependent: str, source: Optional[str] = ERROR_BAR_AUTO
+) -> Optional[np.ndarray]:
     """Return y error-bar values associated with a dependent, if present."""
-    error_name = errorBarDataName(data, dependent)
+    error_name = errorBarDataName(data, dependent, source)
     if error_name is None:
         return None
 
@@ -317,12 +350,17 @@ def errorBarData(data: DataDictBase, dependent: str) -> Optional[np.ndarray]:
     return error_values
 
 
-def plottableDependents(data: DataDictBase) -> List[str]:
+def plottableDependents(
+    data: DataDictBase, errorBarSources: Optional[Dict[str, str]] = None
+) -> List[str]:
     """Return dependents excluding fields referenced as error bars."""
     error_names = set()
     dependents = data.dependents()
     for dependent in dependents:
-        error_name = errorBarDataName(data, dependent)
+        source = ERROR_BAR_AUTO
+        if errorBarSources is not None:
+            source = errorBarSources.get(dependent, ERROR_BAR_AUTO)
+        error_name = errorBarDataName(data, dependent, source)
         if error_name is not None:
             error_names.add(error_name)
     return [dependent for dependent in dependents if dependent not in error_names]

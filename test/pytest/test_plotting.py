@@ -5,9 +5,11 @@ from plottr.data.datadict import DataDict
 from plottr.plot.base import (
     AutoFigureMaker,
     ComplexRepresentation,
+    ERROR_BAR_NONE,
     PlotDataType,
     PlotItem,
     errorBarData,
+    errorBarDataNames,
     errorBarDataName,
     plottableDependents,
 )
@@ -63,6 +65,21 @@ def test_errorbar_column_from_name_convention():
     assert errorBarDataName(dd, 'signal') == 'signal_err'
     assert np.allclose(errorBarData(dd, 'signal'), np.ones(3) * 0.2)
     assert plottableDependents(dd) == ['signal']
+
+
+def test_errorbar_column_from_explicit_source():
+    dd = DataDict(
+        power=dict(values=np.arange(3)),
+        Q=dict(values=np.array([1.0e4, 1.1e4, 1.2e4]), axes=['power']),
+        Q_sigma=dict(values=np.array([100.0, 110.0, 120.0]), axes=['power']),
+    )
+
+    assert 'Q_sigma' in errorBarDataNames(dd, 'Q')
+    assert errorBarDataName(dd, 'Q') is None
+    assert errorBarDataName(dd, 'Q', 'Q_sigma') == 'Q_sigma'
+    assert np.allclose(errorBarData(dd, 'Q', 'Q_sigma'), [100.0, 110.0, 120.0])
+    assert plottableDependents(dd, {'Q': 'Q_sigma'}) == ['Q']
+    assert plottableDependents(dd, {'Q': ERROR_BAR_NONE}) == ['Q', 'Q_sigma']
 
 
 def test_complex_plane_representation_splits_to_real_vs_imag():
