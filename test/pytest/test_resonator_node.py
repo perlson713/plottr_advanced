@@ -14,12 +14,12 @@ import pytest
 
 from plottr.data.datadict import DataDict
 from plottr.node.tools import linearFlowchart
-from plottr.node.resonator import (ResonatorFit, _default_dependent,
-                                   resonator_fit_module)
+from plottr.node.resonator import ResonatorFit, resonator_fit_module
 
-rf, _message = resonator_fit_module()
+refit, _message = resonator_fit_module()
 pytestmark = pytest.mark.skipif(
-    rf is None, reason='resonator_fit.py is not importable (RESONATOR_FIT_PATH)')
+    refit is None, reason='dataset_refit.py is not importable (RESONATOR_FIT_PATH)')
+rf = getattr(refit, 'rf', None)
 
 FR = 10e9
 QL = 5000.0
@@ -162,7 +162,7 @@ def test_saved_fit_columns_are_not_clobbered(qtbot):
 
 def test_the_measured_trace_is_preferred_over_a_calibrated_copy():
     # `s11_cor` は較正済みのコピー。既定で当てるのは測定そのままのトレース。
-    assert _default_dependent(['s11_cor', 's11_raw']) == 's11_raw'
-    assert _default_dependent(['s21_normalized', 's21']) == 's21'
-    assert _default_dependent(['s11_cor']) == 's11_cor'
-    assert _default_dependent([]) == ''
+    assert refit.default_dependent(['s11_cor', 's11_raw']) == 's11_raw'
+    assert refit.default_dependent(['s21_normalized', 's21']) == 's21'
+    assert refit.default_dependent(['s11_cor']) == 's11_cor'
+    assert refit.default_dependent([]) == ''
