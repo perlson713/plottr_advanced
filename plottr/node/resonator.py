@@ -26,6 +26,7 @@ in its widget; nothing else in plottr depends on it.
 
 import os
 import sys
+import time
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
@@ -144,7 +145,8 @@ class _ResonatorFitOptionsWidget(FormLayoutWrapper):
                 ('Fit and overlay', QtWidgets.QCheckBox()),
                 ('Trace', QtWidgets.QComboBox()),
                 ('Resonator type', QtWidgets.QComboBox()),
-                ('Nonlinearity', QtWidgets.QCheckBox()),
+                ('Nonlinearity', QtWidgets.QCheckBox(
+                    'slow: seconds to a minute per trace')),
                 ('Sweep direction', QtWidgets.QComboBox()),
                 ('Status', QtWidgets.QLabel('')),
             ],
@@ -163,7 +165,8 @@ class _ResonatorFitOptionsWidget(FormLayoutWrapper):
         self.sweepBranch.addItem('high to low', 'down')
         self.nonlinear.setToolTip(
             'Fit the kinetic-inductance nonlinearity of Swenson et al. '
-            '(arXiv:1305.4281).  Slower: seconds per trace.')
+            '(arXiv:1305.4281).  The fit runs in the GUI thread, so the window '
+            'does not respond while it works: measured 5-25 s per trace.')
         self.status.setWordWrap(True)
 
 
@@ -376,6 +379,7 @@ class ResonatorFit(Node):
         if self._cache is not None and self._cache[0] == self._fingerprint(data, dependent):
             return dict(dataOut=self._cache[1])
 
+        started = time.monotonic()
         try:
             out, status = self._fit(module, data, dependent)
         except Exception as exc:
@@ -385,7 +389,7 @@ class ResonatorFit(Node):
             return dict(dataOut=data)
 
         self._cache = (self._fingerprint(data, dependent), out)
-        self.fitStatusChanged.emit(status)
+        self.fitStatusChanged.emit(f'{status} ({time.monotonic() - started:.1f} s)')
         return dict(dataOut=out)
 
     def _fit(self, module: ModuleType, data: DataDictBase, dependent: str) \
@@ -495,7 +499,8 @@ class ResonatorFit(Node):
 
 #: fit results that are worth carrying into the dataset
 _PARAMETERS = ('fr', 'fr_err', 'Ql', 'Ql_err', 'Qi', 'Qi_err', 'Qc',
-               'absQc', 'absQc_err', 'phi0', 'a', 'a_err', 'snr', 'chi_square')
+               'absQc', 'absQc_err', 'phi0', 'a', 'a_err', 'bifurcated',
+               'snr', 'chi_square')
 
 
 def _as_float(value: Any) -> float:
