@@ -24,6 +24,7 @@ from ..node.tools import linearFlowchart
 from ..node.node import Node
 from ..node.histogram import Histogrammer
 from ..node.resonator import ResonatorFit
+from ..node.dependent_axis import DependentAsAxis
 from ..plot import PlotNode, makeFlowchartWithPlot, PlotWidget
 from ..plot.mpl.autoplot import AutoPlot as MPLAutoPlot
 from ..plot.pyqtgraph.autoplot import AutoPlot as PGAutoPlot
@@ -314,6 +315,7 @@ def autoplotQcodesDataset(log: bool = False,
     fc = linearFlowchart(
         ('Data loader', QCodesDSLoader),
         ('Resonator fit', ResonatorFit),
+        ('Photon axis', DependentAsAxis),
         ('Data selection', DataSelector),
         ('Grid', DataGridder),
         ('Dimension assignment', XYSelector),
@@ -327,6 +329,8 @@ def autoplotQcodesDataset(log: bool = False,
                                dockArea=QtCore.Qt.TopDockWidgetArea),
         "Resonator fit": dict(visible=False,
                               dockArea=QtCore.Qt.TopDockWidgetArea),
+        "Photon axis": dict(visible=False,
+                            dockArea=QtCore.Qt.TopDockWidgetArea),
         "Dimension assignment": dict(visible=True,
                                      dockArea=QtCore.Qt.TopDockWidgetArea),
     }
@@ -348,6 +352,7 @@ def autoplotDDH5(filepath: str = '',
     fc = linearFlowchart(
         ('Data loader', DDH5Loader),
         ('Resonator fit', ResonatorFit),
+        ('Photon axis', DependentAsAxis),
         ('Data selection', DataSelector),
         ('Grid', DataGridder),
         ('Histogram', Histogrammer),
@@ -360,6 +365,8 @@ def autoplotDDH5(filepath: str = '',
                                dockArea=QtCore.Qt.TopDockWidgetArea),
         "Resonator fit": dict(visible=False,
                               dockArea=QtCore.Qt.TopDockWidgetArea),
+        "Photon axis": dict(visible=False,
+                            dockArea=QtCore.Qt.TopDockWidgetArea),
         "Histogram": dict(visible=False,
                           dockArea=QtCore.Qt.TopDockWidgetArea),
         "Dimension assignment": dict(visible=True,

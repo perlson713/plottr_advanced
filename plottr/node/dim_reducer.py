@@ -831,16 +831,32 @@ class XYSelector(DimensionReducer):
                     f'x-Axis is None. this will result in empty output data.')
                 return False
             elif self._xyAxes[0] not in availableAxes:
+                # The remembered axis is gone -- an upstream node replaced the
+                # axes (for example `DependentAsAxis`, which puts the photon
+                # number where `power` used to be).  Refusing here leaves the
+                # pipeline with no output at all, so the plot silently keeps
+                # showing the previous dataset.  Fall back to an axis that does
+                # exist instead; the user can still pick another one.
                 self.node_logger.warning(
-                    f'x-Axis {self._xyAxes[0]} not present in data')
-                return False
+                    f'x-Axis {self._xyAxes[0]} not present in data; '
+                    f'falling back to {availableAxes[0]}')
+                y = self._xyAxes[1] if self._xyAxes[1] in availableAxes else None
+                if y == availableAxes[0]:
+                    y = None
+                self._xyAxes = availableAxes[0], y
+                self.optionChangeNotification.emit(
+                    {'dimensionRoles': self.dimensionRoles})
 
             if self._xyAxes[1] is None:
                 self.node_logger.debug(f'y-Axis is None; result will be 1D')
             elif self._xyAxes[1] not in availableAxes:
+                # Same as for the x-axis: drop it rather than stop producing
+                # output.  Without a y-axis the result is simply 1D.
                 self.node_logger.warning(
-                    f'y-Axis {self._xyAxes[1]} not present in data')
-                return False
+                    f'y-Axis {self._xyAxes[1]} not present in data; dropped')
+                self._xyAxes = self._xyAxes[0], None
+                self.optionChangeNotification.emit(
+                    {'dimensionRoles': self.dimensionRoles})
             elif self._xyAxes[1] == self._xyAxes[0]:
                 self.node_logger.warning(f"y-Axis cannot be equal to x-Axis.")
                 return False
