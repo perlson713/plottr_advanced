@@ -22,10 +22,17 @@ This module contains:
 * :class:`.DependentAsAxis` -- the node.
 * :class:`.DependentAsAxisWidget` -- its node widget.
 
-There is no physics here: the node only re-arranges columns that the
-measurement script already wrote.  In particular it does not compute the
-photon number -- that needs the fit and the line attenuation, and it belongs
-in the measurement repository, which is where it is.
+The node also takes the line attenuation.  ``line_attenuation_db`` is typed in
+by hand -- it cannot be read off a trace -- so it is the one number that is
+regularly forgotten or left over from another fridge wiring, and without it the
+measurement script writes ``photon`` as NaN.  Nothing has to be measured again:
+the photon number follows from the saved ``fr``, ``Qc``, ``Qi`` and the drive
+power, so entering the attenuation here recomputes the column.
+
+There is still no physics here.  The recomputation is
+``dataset_refit.recompute_photons`` in the measurement repository (which calls
+``resonator_tools`` for the formula), the same function ``refit_dataset.py``
+uses offline; this node only passes the number the operator typed.
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -36,6 +43,7 @@ from plottr import QtWidgets, Signal, Slot
 from ..data.datadict import DataDict, DataDictBase
 from ..gui.widgets import FormLayoutWrapper
 from .node import Node, NodeWidget, updateOption
+from .resonator import resonator_fit_module
 
 __all__ = ['DependentAsAxis', 'DependentAsAxisWidget']
 
@@ -85,15 +93,25 @@ class _DependentAsAxisOptionsWidget(FormLayoutWrapper):
                 ('Use a dependent as x axis', QtWidgets.QCheckBox()),
                 ('x axis', QtWidgets.QComboBox()),
                 ('Logarithmic', QtWidgets.QCheckBox('plot log10(x) instead of x')),
+                ('Line attenuation (dB)', QtWidgets.QLineEdit()),
                 ('Status', QtWidgets.QLabel('')),
             ],
         )
         self.enabled = self.elements['Use a dependent as x axis']
         self.abscissa = self.elements['x axis']
         self.logAbscissa = self.elements['Logarithmic']
+        self.attenuation = self.elements['Line attenuation (dB)']
         self.status = self.elements['Status']
 
         self.abscissa.addItem('(automatic)', '')
+        self.attenuation.setPlaceholderText('as measured')
+        self.attenuation.setToolTip(
+            'Total attenuation between the VNA source and the device, in dB.  '
+            'Leave it empty to keep the photon number as it was measured; type '
+            'a number to recompute it, which is what to do when '
+            'line_attenuation_db was forgotten or wrong.  Nothing needs to be '
+            'measured again: the photon number follows from the saved fr, Qc, '
+            'Qi and the drive power.')
         self.logAbscissa.setToolTip(
             "plottr's plot widgets have no logarithmic axis, so the node takes "
             'the logarithm itself.  The photon number spans decades, so this is '
@@ -113,11 +131,13 @@ class DependentAsAxisWidget(NodeWidget):
             'enabled': self.widget.enabled.setChecked,
             'abscissa': self.setAbscissa,
             'logAbscissa': self.widget.logAbscissa.setChecked,
+            'attenuation': self.widget.attenuation.setText,
         }
         self.optGetters = {
             'enabled': self.widget.enabled.isChecked,
             'abscissa': self.getAbscissa,
             'logAbscissa': self.widget.logAbscissa.isChecked,
+            'attenuation': self.widget.attenuation.text,
         }
 
         self.widget.enabled.toggled.connect(lambda: self.signalOption('enabled'))
@@ -125,6 +145,10 @@ class DependentAsAxisWidget(NodeWidget):
             lambda: self.signalOption('abscissa'))
         self.widget.logAbscissa.toggled.connect(
             lambda: self.signalOption('logAbscissa'))
+        # editingFinished, not textChanged: recomputing on every keystroke would
+        # re-run the whole flowchart for '7', '70', '70.'.
+        self.widget.attenuation.editingFinished.connect(
+            lambda: self.signalOption('attenuation'))
 
         if node is not None:
             node.candidatesChanged.connect(self.setAbscissaOptions)
@@ -162,12 +186,18 @@ class DependentAsAxis(Node):
     default: the node changes what the dataset *is*, so it should only do that
     when it was asked to.
 
+    Recomputing the photon number from a re-entered line attenuation is
+    independent of the swap: with ``enabled`` off and an attenuation typed in,
+    the dataset keeps its shape and only ``photon`` changes.
+
     :Options:
         - ``enabled``: do the swap at all.
         - ``abscissa``: the dependent to use as the x axis.  Empty means
           automatic, which looks for ``photon``.
         - ``logAbscissa``: emit ``log10`` of the abscissa instead of the
           abscissa itself.
+        - ``attenuation``: line attenuation in dB, as text.  Empty leaves the
+          photon number as it was measured.
     """
 
     nodeName = 'DependentAsAxis'
@@ -183,6 +213,7 @@ class DependentAsAxis(Node):
         self._enabled = False
         self._abscissa = ''
         self._logAbscissa = True
+        self._attenuation = ''
         self._candidates: List[str] = []
         super().__init__(name)
 
@@ -213,36 +244,83 @@ class DependentAsAxis(Node):
     def logAbscissa(self, value: bool) -> None:
         self._logAbscissa = bool(value)
 
+    @property
+    def attenuation(self) -> str:
+        return self._attenuation
+
+    @attenuation.setter
+    @updateOption('attenuation')
+    def attenuation(self, value: str) -> None:
+        self._attenuation = str('' if value is None else value).strip()
+
     def process(self, dataIn: Optional[DataDictBase] = None) \
             -> Optional[Dict[str, Optional[DataDictBase]]]:
         if dataIn is None:
             return None
 
-        candidates = _candidates(dataIn)
+        data, notes = self._recomputePhotons(dataIn)
+
+        candidates = _candidates(data)
         if candidates != self._candidates:
             self._candidates = candidates
             self.candidatesChanged.emit(candidates)
 
         if not self._enabled:
-            self.statusChanged.emit('')
-            return dict(dataOut=dataIn)
+            self.statusChanged.emit('; '.join(notes))
+            return dict(dataOut=data)
 
-        abscissa = _pick(dataIn, self._abscissa)
+        abscissa = _pick(data, self._abscissa)
         if not abscissa:
-            self.statusChanged.emit(
+            notes.append(
                 'No dependent can be used as an axis here.  The node needs two '
                 'or more dependents that share the same axes -- for example '
                 '`photon` and `Qi`, both against `power`.')
-            return dict(dataOut=dataIn)
+            self.statusChanged.emit('; '.join(notes))
+            return dict(dataOut=data)
 
         try:
-            dataOut, message = self._swap(dataIn, abscissa)
+            dataOut, message = self._swap(data, abscissa)
         except Exception as exc:  # noqa: BLE001 -- never take the viewer down
-            self.statusChanged.emit(f'{type(exc).__name__}: {exc}')
-            return dict(dataOut=dataIn)
+            notes.append(f'{type(exc).__name__}: {exc}')
+            self.statusChanged.emit('; '.join(notes))
+            return dict(dataOut=data)
 
-        self.statusChanged.emit(message)
-        return dict(dataOut=dataOut if dataOut is not None else dataIn)
+        notes.append(message)
+        self.statusChanged.emit('; '.join(note for note in notes if note))
+        return dict(dataOut=dataOut if dataOut is not None else data)
+
+    def _recomputePhotons(self, data: DataDictBase) \
+            -> Tuple[DataDictBase, List[str]]:
+        """Redo the photon number with the attenuation that was typed in.
+
+        Returns the data (unchanged when the field is empty or the
+        recomputation is not possible) and the notes to show in the status
+        line.  It never raises: a bad number should say so, not take the
+        viewer down.
+        """
+        text = self._attenuation
+        if not text:
+            return data, []
+        try:
+            attenuation = float(text)
+        except ValueError:
+            return data, [f'Line attenuation: `{text}` is not a number in dB.']
+
+        module, source = resonator_fit_module()
+        if module is None:
+            return data, [f'Line attenuation: {source}']
+        if not hasattr(module, 'recompute_photons'):
+            # An older checkout of the measurement repository next to a newer
+            # plottr.  Say which one is behind rather than raising AttributeError.
+            return data, [
+                'Line attenuation: this version of dataset_refit.py cannot '
+                f'recompute the photon number ({source}).  Update the '
+                'measurement repository (qcodes_measurement).']
+        try:
+            out, message = module.recompute_photons(data, attenuation)
+        except Exception as exc:  # noqa: BLE001 -- never take the viewer down
+            return data, [f'Line attenuation: {type(exc).__name__}: {exc}']
+        return out, [message]
 
     def _swap(self, data: DataDictBase, abscissa: str) \
             -> Tuple[Optional[DataDictBase], str]:
@@ -286,8 +364,11 @@ class DependentAsAxis(Node):
                       if dropped == x.size else '')
             if abscissa == 'photon':
                 reason += (' The measurement script can only compute the photon '
-                           'number when `line_attenuation_db` is set in the '
-                           'setup file; without it the column is all NaN.')
+                           'number when `line_attenuation_db` is set (in the '
+                           'measurement config, or in the setup file); without '
+                           'it the column is all NaN.  Type the attenuation in '
+                           'dB into this node to recompute it -- the '
+                           'measurement does not have to be repeated.')
             return None, ('Nothing to plot: ' + reason).strip()
 
         order = np.argsort(x[good], kind='stable')
