@@ -236,6 +236,8 @@ class DependentAsAxis(Node):
         self._logAbscissa = True
         self._attenuation = ''
         self._portType = 'reflection'
+        #: line attenuation actually applied on the last pass, for the label
+        self._appliedAttenuation: Optional[float] = None
         self._candidates: List[str] = []
         super().__init__(name)
 
@@ -329,6 +331,7 @@ class DependentAsAxis(Node):
         line.  It never raises: a bad number should say so, not take the
         viewer down.
         """
+        self._appliedAttenuation = None
         text = self._attenuation
         if not text:
             return data, []
@@ -352,6 +355,7 @@ class DependentAsAxis(Node):
                 data, attenuation, port_type=self._portType)
         except Exception as exc:  # noqa: BLE001 -- never take the viewer down
             return data, [f'Line attenuation: {type(exc).__name__}: {exc}']
+        self._appliedAttenuation = attenuation
         return out, [message]
 
     def _swap(self, data: DataDictBase, abscissa: str) \
@@ -379,6 +383,13 @@ class DependentAsAxis(Node):
         name = abscissa
         unit = data.get(abscissa, {}).get('unit', '')
         label = data.label(abscissa) or abscissa
+        if self._appliedAttenuation is not None:
+            # Say it on the axis, not only in the status line.  Ten dB moves
+            # log10(photon) by exactly one, and the plot rescales itself, so
+            # the curve looks unchanged and only the tick labels move -- which
+            # reads as "typing the attenuation did nothing".  It also keeps the
+            # assumption with the figure when it is saved or shown to someone.
+            label = f'{label} @ {self._appliedAttenuation:g} dB'
         if self._logAbscissa:
             with np.errstate(divide='ignore', invalid='ignore'):
                 x = np.log10(x)

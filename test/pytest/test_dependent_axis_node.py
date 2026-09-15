@@ -319,6 +319,33 @@ def test_port_type_reaches_the_recomputation(qtbot):
     assert np.allclose(again, _expected_photons(70.0))
 
 
+def test_the_axis_label_carries_the_attenuation(qtbot):
+    """10 dB は log10(photon) のちょうど 1 桁ぶんの平行移動で、plottr は自動
+    スケールするので**曲線の形は変わらない**。軸の名前に入れておかないと、
+    値を入れても何も起きていないように見える（実際にそう報告された）。"""
+    _measurement_module()
+    fc, node = _flowchart()
+    node.enabled = True
+    node.attenuation = '70'
+    fc.setInput(dataIn=_dataset())
+    out = fc.output()['dataOut']
+    axis = out.axes()[0]
+    assert '70' in out.label(axis)
+
+    node.attenuation = '80'
+    shifted = fc.output()['dataOut']
+    assert '80' in shifted.label(axis)
+    # 軸の名前は変えない。変えると下流の XYSelector が選択を失う。
+    assert shifted.axes() == [axis]
+    # 10 dB でちょうど 1 桁動く。
+    assert np.allclose(np.asarray(out.data_vals(axis))
+                       - np.asarray(shifted.data_vals(axis)), 1.0)
+
+    # 減衰量を入れていなければ、ラベルはそのまま。
+    node.attenuation = ''
+    assert 'dB' not in fc.output()['dataOut'].label(axis)
+
+
 def test_a_bad_attenuation_says_so_and_changes_nothing(qtbot):
     messages = []
     fc, node = _flowchart()
