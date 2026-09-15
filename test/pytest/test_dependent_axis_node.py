@@ -294,6 +294,31 @@ def test_attenuation_then_swap_gives_the_photon_axis(qtbot):
     assert np.allclose(np.sort(_expected_photons(70.0)), x)
 
 
+def test_port_type_reaches_the_recomputation(qtbot):
+    """Not cosmetic: from resonator-tools 2.2.0 notch carries half the
+    coefficient of reflection, so the wrong choice is wrong by a factor 2."""
+    _measurement_module()
+    import resonator_fit as rf
+
+    fc, node = _flowchart()
+    node.attenuation = '70'
+    node.portType = 'notch'
+    fc.setInput(dataIn=_dataset(photons=[float('nan')] * len(POWERS)))
+    out = fc.output()['dataOut']
+
+    photons = np.asarray(out.data_vals('photon'), dtype=float).reshape(-1)
+    expected = [rf.photons_in_resonator(power - 70.0, fr=FR, Qc=qc, Qi=qi,
+                                        port_type='notch')
+                for power, qc, qi in zip(POWERS, QC, QI)]
+    assert np.allclose(photons, expected)
+
+    # 既定は reflection（この測定系はサーキュレータの先）。
+    node.portType = 'reflection'
+    again = np.asarray(
+        fc.output()['dataOut'].data_vals('photon'), dtype=float).reshape(-1)
+    assert np.allclose(again, _expected_photons(70.0))
+
+
 def test_a_bad_attenuation_says_so_and_changes_nothing(qtbot):
     messages = []
     fc, node = _flowchart()

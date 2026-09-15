@@ -94,6 +94,7 @@ class _DependentAsAxisOptionsWidget(FormLayoutWrapper):
                 ('x axis', QtWidgets.QComboBox()),
                 ('Logarithmic', QtWidgets.QCheckBox('plot log10(x) instead of x')),
                 ('Line attenuation (dB)', QtWidgets.QLineEdit()),
+                ('Resonator type', QtWidgets.QComboBox()),
                 ('Status', QtWidgets.QLabel('')),
             ],
         )
@@ -101,7 +102,16 @@ class _DependentAsAxisOptionsWidget(FormLayoutWrapper):
         self.abscissa = self.elements['x axis']
         self.logAbscissa = self.elements['Logarithmic']
         self.attenuation = self.elements['Line attenuation (dB)']
+        self.portType = self.elements['Resonator type']
         self.status = self.elements['Status']
+
+        self.portType.addItem('reflection (circulator)', 'reflection')
+        self.portType.addItem('notch (hanger)', 'notch')
+        self.portType.setToolTip(
+            'Which resonator this was, for the recomputation above.  It is not '
+            'cosmetic: from resonator-tools 2.2.0 the notch photon number '
+            'carries half the coefficient of the reflection one, so the wrong '
+            'choice is wrong by a factor of two.')
 
         self.abscissa.addItem('(automatic)', '')
         self.attenuation.setPlaceholderText('as measured')
@@ -132,12 +142,14 @@ class DependentAsAxisWidget(NodeWidget):
             'abscissa': self.setAbscissa,
             'logAbscissa': self.widget.logAbscissa.setChecked,
             'attenuation': self.widget.attenuation.setText,
+            'portType': self.setPortType,
         }
         self.optGetters = {
             'enabled': self.widget.enabled.isChecked,
             'abscissa': self.getAbscissa,
             'logAbscissa': self.widget.logAbscissa.isChecked,
             'attenuation': self.widget.attenuation.text,
+            'portType': lambda: str(self.widget.portType.currentData()),
         }
 
         self.widget.enabled.toggled.connect(lambda: self.signalOption('enabled'))
@@ -149,10 +161,17 @@ class DependentAsAxisWidget(NodeWidget):
         # re-run the whole flowchart for '7', '70', '70.'.
         self.widget.attenuation.editingFinished.connect(
             lambda: self.signalOption('attenuation'))
+        self.widget.portType.currentIndexChanged.connect(
+            lambda: self.signalOption('portType'))
 
         if node is not None:
             node.candidatesChanged.connect(self.setAbscissaOptions)
             node.statusChanged.connect(self.widget.status.setText)
+
+    def setPortType(self, value: str) -> None:
+        index = self.widget.portType.findData(value)
+        if index >= 0:
+            self.widget.portType.setCurrentIndex(index)
 
     def getAbscissa(self) -> str:
         return str(self.widget.abscissa.currentData() or '')
@@ -198,6 +217,8 @@ class DependentAsAxis(Node):
           abscissa itself.
         - ``attenuation``: line attenuation in dB, as text.  Empty leaves the
           photon number as it was measured.
+        - ``portType``: ``'reflection'`` or ``'notch'``, for that
+          recomputation.  It changes the answer by a factor of two.
     """
 
     nodeName = 'DependentAsAxis'
@@ -214,6 +235,7 @@ class DependentAsAxis(Node):
         self._abscissa = ''
         self._logAbscissa = True
         self._attenuation = ''
+        self._portType = 'reflection'
         self._candidates: List[str] = []
         super().__init__(name)
 
@@ -252,6 +274,15 @@ class DependentAsAxis(Node):
     @updateOption('attenuation')
     def attenuation(self, value: str) -> None:
         self._attenuation = str('' if value is None else value).strip()
+
+    @property
+    def portType(self) -> str:
+        return self._portType
+
+    @portType.setter
+    @updateOption('portType')
+    def portType(self, value: str) -> None:
+        self._portType = str(value or 'reflection')
 
     def process(self, dataIn: Optional[DataDictBase] = None) \
             -> Optional[Dict[str, Optional[DataDictBase]]]:
@@ -317,7 +348,8 @@ class DependentAsAxis(Node):
                 f'recompute the photon number ({source}).  Update the '
                 'measurement repository (qcodes_measurement).']
         try:
-            out, message = module.recompute_photons(data, attenuation)
+            out, message = module.recompute_photons(
+                data, attenuation, port_type=self._portType)
         except Exception as exc:  # noqa: BLE001 -- never take the viewer down
             return data, [f'Line attenuation: {type(exc).__name__}: {exc}']
         return out, [message]
