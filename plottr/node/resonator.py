@@ -67,7 +67,9 @@ def resonator_fit_module() -> Tuple[Optional[ModuleType], str]:
     from_env = os.environ.get('RESONATOR_FIT_PATH')
     if from_env:
         candidates.append(Path(from_env).expanduser())
-    # ../qcodes_measurement, relative to the plottr checkout
+    # ../qcodes_measurement, relative to the plottr checkout.  This one only
+    # works from a source checkout: installed into site-packages, its parent is
+    # site-packages, and the environment variable is the way in.
     candidates.append(Path(__file__).resolve().parents[2].parent / 'qcodes_measurement')
 
     for path in candidates:
@@ -79,10 +81,20 @@ def resonator_fit_module() -> Tuple[Optional[ModuleType], str]:
         _MODULE_ERROR = f"using {getattr(_MODULE, '__file__', '?')}"
     except Exception as exc:
         _MODULE = None
+        # Say where it looked.  "Set the environment variable" on its own leaves
+        # the operator guessing whether the variable is even being seen; the
+        # list makes a typo in the path obvious.
+        looked = '; '.join(
+            f'{path}{"" if path.is_dir() else " (no such folder)"}'
+            for path in candidates) or 'nowhere'
         _MODULE_ERROR = (
             f"dataset_refit.py could not be imported ({type(exc).__name__}: {exc}). "
-            "Point the RESONATOR_FIT_PATH environment variable at the folder "
-            "that contains it."
+            f"Looked in: {looked}. "
+            "Set the RESONATOR_FIT_PATH environment variable to the folder that "
+            "contains dataset_refit.py (the qcodes_measurement checkout) and "
+            "restart plottr."
+            + ('' if from_env else
+               '  RESONATOR_FIT_PATH is not set in this process.')
         )
     return _MODULE, _MODULE_ERROR
 
