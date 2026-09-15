@@ -9,6 +9,7 @@ import time
 # import cgitb
 # cgitb.enable(format = 'text')
 
+import locale
 import logging
 import re
 import pprint
@@ -61,6 +62,39 @@ AUTOPLOTFUNC = "autoplotDDH5App"
 
 
 LOGGER = logging.getLogger("plottr.apps.monitr")
+
+#: Text files this viewer writes itself (comments, notes) are written in this
+#: encoding, so that a comment reads the same on every machine.
+TEXT_ENCODING = "utf-8"
+
+
+def read_text_file(path: Path) -> str:
+    """Read a text file whatever encoding it happens to be in.
+
+    A dataset folder collects text from several writers.  ``backup_file()``
+    copies the measurement scripts byte for byte, and those are UTF-8 with
+    non-ASCII comments; text this viewer wrote before it named an encoding is
+    in the machine's locale encoding instead (cp932 on a Japanese Windows).
+
+    ``open(path)`` uses the locale encoding, which raises UnicodeDecodeError on
+    the first non-ASCII character of a UTF-8 file -- and since this runs while
+    the right-hand file panel is being populated, one such file used to take
+    the whole panel down.  So: try UTF-8, fall back to the locale encoding for
+    older files, and never raise.
+    """
+    data = path.read_bytes()
+    encodings = [TEXT_ENCODING]
+    locale_encoding = locale.getpreferredencoding(False)
+    if locale_encoding and locale_encoding.lower() != TEXT_ENCODING:
+        encodings.append(locale_encoding)
+    for encoding in encodings:
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    # Unreadable in either: show it with the undecodable bytes replaced rather
+    # than showing nothing at all.
+    return data.decode(TEXT_ENCODING, errors="replace")
 
 
 def html_color_generator() -> Generator[str, None, None]:
@@ -2443,9 +2477,8 @@ class TextViewWidget(QtWidgets.QTextEdit):
         self.setSizePolicy(size_policy)
 
         try:
-            with open(path) as file:
-                self.file_text = file.read()
-        except FileNotFoundError as e:
+            self.file_text = read_text_file(path)
+        except OSError as e:
             LOGGER.error(e)
             self.file_text = "Comment file could not load. Do not edit as this could rewrite the original comment."
         self.setReadOnly(True)
@@ -2522,7 +2555,7 @@ class TextEditWidget(TextViewWidget):
         """
         self.setReadOnly(True)
         try:
-            with open(self.path, "w") as file:
+            with open(self.path, "w", encoding=TEXT_ENCODING) as file:
                 file.write(self.toPlainText())
         except Exception as e:
             # Set text how it was before
@@ -2634,7 +2667,7 @@ class TextInput(QtWidgets.QTextEdit):
             try:
                 comment_path = self.path.joinpath(dialog_text)
                 if not comment_path.is_file():
-                    with open(comment_path, "w") as file:
+                    with open(comment_path, "w", encoding=TEXT_ENCODING) as file:
                         file.write(current_text)
                     self.setText("")
                 else:
@@ -3651,8 +3684,7 @@ class Monitr(QtWidgets.QMainWindow):
                 assert isinstance(json_view.widget, JsonTreeView)
                 json_view.widget.setModel(json_model)
 
-                with open(file) as json_file:
-                    json_model.load(json.load(json_file))
+                json_model.load(json.loads(read_text_file(file)))
 
                 for i in range(len(json_model._headers)):
                     json_view.widget.resizeColumnToContents(i)

@@ -72,31 +72,65 @@ def resonator_fit_module() -> Tuple[Optional[ModuleType], str]:
     # site-packages, and the environment variable is the way in.
     candidates.append(Path(__file__).resolve().parents[2].parent / 'qcodes_measurement')
 
+    found: List[Path] = []
     for path in candidates:
-        if (path / 'dataset_refit.py').is_file() and str(path) not in sys.path:
-            sys.path.insert(0, str(path))
+        if (path / 'dataset_refit.py').is_file():
+            found.append(path)
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
 
     try:
         _MODULE = import_module('dataset_refit')
         _MODULE_ERROR = f"using {getattr(_MODULE, '__file__', '?')}"
     except Exception as exc:
         _MODULE = None
-        # Say where it looked.  "Set the environment variable" on its own leaves
-        # the operator guessing whether the variable is even being seen; the
-        # list makes a typo in the path obvious.
-        looked = '; '.join(
-            f'{path}{"" if path.is_dir() else " (no such folder)"}'
-            for path in candidates) or 'nowhere'
-        _MODULE_ERROR = (
-            f"dataset_refit.py could not be imported ({type(exc).__name__}: {exc}). "
-            f"Looked in: {looked}. "
-            "Set the RESONATOR_FIT_PATH environment variable to the folder that "
-            "contains dataset_refit.py (the qcodes_measurement checkout) and "
-            "restart plottr."
-            + ('' if from_env else
-               '  RESONATOR_FIT_PATH is not set in this process.')
-        )
+        _MODULE_ERROR = _whyNotImported(exc, candidates, found, from_env)
     return _MODULE, _MODULE_ERROR
+
+
+def _whyNotImported(exc: BaseException, candidates: List[Path],
+                    found: List[Path], from_env: Optional[str]) -> str:
+    """Explain a failed import in terms the operator can act on.
+
+    The two failures look identical in the traceback but need opposite fixes,
+    and saying only "set RESONATOR_FIT_PATH" sends the operator round in
+    circles when the path was right all along:
+
+    * the folder is wrong, or has no ``dataset_refit.py`` (an old checkout) --
+      a path problem;
+    * the file is there but importing it raises, almost always because the
+      Python that runs plottr does not have the fit's dependencies (numpy,
+      scipy, resonator-tools) -- a package problem in *that* interpreter,
+      which may not be the one the measurement scripts run under.
+    """
+    detail = f'{type(exc).__name__}: {exc}'
+
+    if found:
+        missing = getattr(exc, 'name', None) if isinstance(
+            exc, ImportError) else None
+        advice = (
+            f'Install it into the Python that runs plottr ({sys.executable}), '
+            f'e.g. `pip install {"resonator-tools" if missing == "resonator_tools" else missing}`.'
+            if missing else
+            'Run it by hand to see the full traceback: '
+            f'`{sys.executable} -c "import dataset_refit"` '
+            f'with RESONATOR_FIT_PATH set.')
+        return (f'Found {found[0] / "dataset_refit.py"}, but importing it '
+                f'failed ({detail}).  This is not a path problem.  {advice}')
+
+    def describe(path: Path) -> str:
+        if not path.is_dir():
+            return f'{path} (no such folder)'
+        return f'{path} (folder exists, but no dataset_refit.py in it)'
+
+    looked = '; '.join(describe(path) for path in candidates) or 'nowhere'
+    return (
+        f'dataset_refit.py was not found ({detail}).  Looked in: {looked}.  '
+        'Set the RESONATOR_FIT_PATH environment variable to the folder that '
+        'contains dataset_refit.py (the qcodes_measurement checkout) and '
+        'restart plottr.'
+        + ('' if from_env else
+           '  RESONATOR_FIT_PATH is not set in this process.'))
 
 
 def _fittable_dependents(data: Optional[DataDictBase]) -> List[str]:
