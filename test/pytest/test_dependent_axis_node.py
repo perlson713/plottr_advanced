@@ -114,9 +114,23 @@ def test_error_bars_travel_with_their_partner(qtbot):
     assert errorBarDataName(out, 'Qi') == 'Qi_err'
 
 
-def test_log10_is_the_default(qtbot):
+def test_the_values_are_left_alone_by_default(qtbot):
+    """既定はそのままの光子数。対数にするのはプロット側の `Scale`（軸が
+    10^4・10^5… と目盛られる）。ノードの `Logarithmic` は古いやり方で、
+    **両方使うと 2 回対数を取ることになる**。"""
     fc, node = _flowchart()
     node.enabled = True
+    fc.setInput(dataIn=_dataset())
+    out = fc.output()['dataOut']
+
+    assert out.axes() == ['photon']
+    assert np.allclose(np.asarray(out.data_vals('photon')), np.sort(PHOTONS))
+
+
+def test_log10_can_still_be_asked_for(qtbot):
+    fc, node = _flowchart()
+    node.enabled = True
+    node.logAbscissa = True
     fc.setInput(dataIn=_dataset())
     out = fc.output()['dataOut']
 
@@ -165,7 +179,7 @@ def test_failed_fits_stay_as_gaps(qtbot):
     fc.setInput(dataIn=dataset)
     out = fc.output()['dataOut']
 
-    assert np.asarray(out.data_vals('log10_photon')).size == len(POWERS)
+    assert np.asarray(out.data_vals('photon')).size == len(POWERS)
     assert np.isnan(np.asarray(out.data_vals('Qi'))).sum() == 1
 
 
@@ -198,8 +212,8 @@ def test_downstream_x_axis_follows_the_swap(qtbot):
 
     node.enabled = True
     out = fc.output()['dataOut']
-    assert xy.xyAxes[0] == 'log10_photon'
-    assert out is not None and out.axes() == ['log10_photon']
+    assert xy.xyAxes[0] == 'photon'
+    assert out is not None and out.axes() == ['photon']
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +334,13 @@ def test_port_type_reaches_the_recomputation(qtbot):
 
 
 def test_the_axis_label_carries_the_attenuation(qtbot):
-    """10 dB は log10(photon) のちょうど 1 桁ぶんの平行移動で、plottr は自動
-    スケールするので**曲線の形は変わらない**。軸の名前に入れておかないと、
-    値を入れても何も起きていないように見える（実際にそう報告された）。"""
+    """10 dB は光子数のちょうど 1 桁ぶんで、plottr は自動スケールするので
+    **曲線の形は変わらない**。軸の名前に入れておかないと、値を入れても何も
+    起きていないように見える（実際にそう報告された）。"""
     _measurement_module()
     fc, node = _flowchart()
     node.enabled = True
+    node.logAbscissa = True
     node.attenuation = '70'
     fc.setInput(dataIn=_dataset())
     out = fc.output()['dataOut']
@@ -371,3 +386,20 @@ def test_without_fit_parameters_it_explains_instead_of_failing(qtbot):
 
     assert out is not None
     assert any('fr' in m and 'Qc' in m for m in messages)
+
+
+def test_the_title_survives_the_swap(qtbot):
+    """軸を入れ替えたデータセットにも、元の名前を残す。
+
+    `title` は図の上に出る名前で、データセットを比べるときの見分けにも使う。
+    作り直したデータセットで落とすと、その両方が消える（実際に消えていた）。
+    """
+    dataset = _dataset()
+    dataset.add_meta('title', 'somewhere/2026-09-17T120000_ab-CD32_r1/data.ddh5')
+
+    fc, node = _flowchart()
+    node.enabled = True
+    fc.setInput(dataIn=dataset)
+    out = fc.output()['dataOut']
+
+    assert out.meta_val('title') == dataset.meta_val('title')

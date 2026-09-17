@@ -148,3 +148,142 @@ def test_a_broken_file_says_so_and_keeps_the_plot(qtbot, tmp_path):
 
     assert set(out.dependents()) == {'Qi', 'Qi_err', 'photon'}   # 元のまま
     assert messages and messages[-1] != ''
+
+
+# ---------------------------------------------------------------------------
+# 比べる列を絞る。
+#
+# パワー掃引は 30 列ほど保存する。3 つ重ねると `Data selection` が 100 行になり、
+# 見たい 1 本を探すのが仕事になってしまう。
+# ---------------------------------------------------------------------------
+
+
+def _sweepWithExtras(powers):
+    """トレースやフィットパラメータまで入った、実際の形に近いデータセット。"""
+    freq = np.linspace(9.99e9, 1.001e10, 4)
+    data = DataDict(
+        frequency=dict(unit='Hz'),
+        power=dict(unit='dBm'),
+        s11_raw=dict(axes=['frequency', 'power']),
+        Qi=dict(axes=['power']),
+        Qi_err=dict(axes=['power']),
+        Ql=dict(axes=['power']),
+        Qc=dict(axes=['power']),
+        fr=dict(axes=['power'], unit='Hz'),
+        snr=dict(axes=['power']),
+        photon=dict(axes=['power']),
+    )
+    data.validate()
+    for index, power in enumerate(powers):
+        data.add_data(frequency=freq, power=power,
+                      s11_raw=np.ones(freq.size, dtype=complex),
+                      Qi=1.0e5 * (index + 1), Qi_err=1.0e3, Ql=5.0e4,
+                      Qc=8.0e4, fr=1.0e10, snr=30.0,
+                      photon=10.0 ** (index + 1))
+    return data
+
+
+def test_only_the_compared_column_is_brought_over(qtbot, tmp_path):
+    from plottr.node.dataset_join import DEFAULT_COLUMNS
+
+    fc, node = _flowchart()
+    path = _write(tmp_path, 'CD32_r2', _sweep(POWERS_B, qi0=2.0e5))
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.files = [path]
+    out = fc.output()['dataOut']
+
+    assert node.columns == DEFAULT_COLUMNS == 'Qi'
+    names = set(out.dependents())
+    # 比べる列と、そのエラーバーだけ
+    assert names == {'Qi [A]'.replace('A', 'this one'), 'Qi [this one]_err',
+                     'Qi [CD32_r2]', 'Qi [CD32_r2]_err'}
+    assert not any('photon [' in name for name in names)
+
+
+def test_the_flood_of_columns_is_what_this_prevents(qtbot, tmp_path):
+    fc, node = _flowchart()
+    path = _write(tmp_path, 'CD32_r2', _sweepWithExtras(POWERS_B))
+    fc.setInput(dataIn=_sweepWithExtras(POWERS_A))
+
+    node.columns = ''            # 全部持ってくる（従来の動き）
+    node.files = [path]
+    everything = set(fc.output()['dataOut'].dependents())
+
+    node.columns = 'Qi'
+    few = set(fc.output()['dataOut'].dependents())
+
+    assert len(few) < len(everything)
+    assert len(few) == 4         # Qi と Qi_err が 2 データセットぶん
+    assert not any('s11_raw' in name for name in few)
+
+
+def test_several_columns_can_be_compared(qtbot, tmp_path):
+    fc, node = _flowchart()
+    path = _write(tmp_path, 'CD32_r2', _sweepWithExtras(POWERS_B))
+    fc.setInput(dataIn=_sweepWithExtras(POWERS_A))
+    node.columns = 'Qi, Ql'
+    node.files = [path]
+
+    names = set(fc.output()['dataOut'].dependents())
+    assert any(name.startswith('Ql [') for name in names)
+    assert any(name.startswith('Qi [') for name in names)
+    assert not any(name.startswith('Qc [') for name in names)
+
+
+def test_a_column_that_is_not_there_says_so(qtbot, tmp_path):
+    messages = []
+    fc, node = _flowchart()
+    node.statusChanged.connect(messages.append)
+
+    path = _write(tmp_path, 'CD32_r2', _sweep(POWERS_B))
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.columns = 'nothing_like_this'
+    node.files = [path]
+    out = fc.output()['dataOut']
+
+    assert set(out.dependents()) == {'Qi', 'Qi_err', 'photon'}   # 元のまま
+    assert any('nothing_like_this' in m for m in messages)
+
+
+def test_error_bars_come_along_without_being_asked(qtbot, tmp_path):
+    from plottr.node.dataset_join import wantedColumns
+
+    data = _sweepWithExtras(POWERS_A)
+    assert wantedColumns(data, ['Qi']) == ['Qi', 'Qi_err']
+    assert wantedColumns(data, ['Ql']) == ['Ql']       # 誤差の列が無ければそれだけ
+    assert wantedColumns(data, []) == list(data.dependents())
+
+
+def test_column_names_can_be_separated_by_commas_or_spaces():
+    from plottr.node.dataset_join import parseColumns
+
+    assert parseColumns('Qi, Ql') == ['Qi', 'Ql']
+    assert parseColumns('Qi Ql') == ['Qi', 'Ql']
+    assert parseColumns('  Qi ,, Ql  ') == ['Qi', 'Ql']
+    assert parseColumns('') == []
+
+
+def test_the_open_dataset_is_named_after_its_file(qtbot, tmp_path):
+    """`title` は読み込んだファイルのパス。凡例がそこから名前を取る。"""
+    fc, node = _flowchart()
+    here = _sweep(POWERS_A)
+    here.add_meta('title', str(tmp_path / '2026-09-17T120000_ab-CD32_r1' / 'data.ddh5'))
+    path = _write(tmp_path, 'CD32_r2', _sweep(POWERS_B))
+
+    fc.setInput(dataIn=here)
+    node.files = [path]
+    names = set(fc.output()['dataOut'].dependents())
+
+    assert 'Qi [CD32_r1]' in names and 'Qi [CD32_r2]' in names
+
+
+def test_the_title_survives_the_join(qtbot, tmp_path):
+    """図の上に出ている名前を落とさない。"""
+    fc, node = _flowchart()
+    here = _sweep(POWERS_A)
+    here.add_meta('title', 'somewhere/2026-09-17T120000_ab-CD32_r1/data.ddh5')
+    node.files = [_write(tmp_path, 'CD32_r2', _sweep(POWERS_B))]
+    fc.setInput(dataIn=here)
+
+    out = fc.output()['dataOut']
+    assert out.meta_val('title') == here.meta_val('title')

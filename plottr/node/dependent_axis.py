@@ -13,9 +13,11 @@ the new axis.  Downstream, ``Data selection`` then offers ``Qi``, ``Ql``,
 ``<dep>_err`` columns travel with their partners and keep being resolved by
 ``errorBarDataName()``.
 
-The photon number spans decades, and plottr's plot widgets have no logarithmic
-axis, so the node offers to take ``log10`` of the abscissa.  That is on by
-default -- a linear axis from 1 to a million is not a plot anybody can read.
+The photon number spans decades, so the axis wants to be logarithmic.  The
+plot's own ``Scale`` does that properly (ticks at 10^4, 10^5, ...), so this
+node leaves the values alone by default.  ``Logarithmic`` here is the older
+way: it emits ``log10`` of the abscissa, which reads 4, 5, 6 on a linear axis.
+Use one or the other -- with both, the logarithm is taken twice.
 
 This module contains:
 
@@ -124,9 +126,10 @@ class _DependentAsAxisOptionsWidget(FormLayoutWrapper):
             'measured again: the photon number follows from the saved fr, Qc, '
             'Qi and the drive power.')
         self.logAbscissa.setToolTip(
-            "plottr's plot widgets have no logarithmic axis, so the node takes "
-            'the logarithm itself.  The photon number spans decades, so this is '
-            'on by default.')
+            'Emit log10 of the abscissa instead of the abscissa itself, which '
+            'puts a decade at every unit of a linear axis.  Prefer the plot '
+            "toolbar's Scale -> x axis -> Log: it keeps the values and labels "
+            'the decades.  Using both takes the logarithm twice.')
         self.status.setWordWrap(True)
 
 
@@ -215,7 +218,8 @@ class DependentAsAxis(Node):
         - ``abscissa``: the dependent to use as the x axis.  Empty means
           automatic, which looks for ``photon``.
         - ``logAbscissa``: emit ``log10`` of the abscissa instead of the
-          abscissa itself.
+          abscissa itself.  Off by default: the plot's ``Scale`` makes a
+          proper log axis out of the values themselves.
         - ``attenuation``: line attenuation in dB, as text.  Empty leaves the
           photon number as it was measured.
         - ``portType``: ``'reflection'`` or ``'notch'``, for that
@@ -234,7 +238,7 @@ class DependentAsAxis(Node):
     def __init__(self, name: str) -> None:
         self._enabled = False
         self._abscissa = ''
-        self._logAbscissa = True
+        self._logAbscissa = False
         self._attenuation = ''
         self._portType = 'reflection'
         #: line attenuation actually applied on the last pass, for the label
@@ -451,6 +455,11 @@ def swapDependentToAxis(data: DataDictBase, abscissa: str, log: bool = True,
             unit=data.get(partner, {}).get('unit', ''),
             label=data.get(partner, {}).get('label', ''),
         )
+    # Carry the dataset's meta over: `title` is what the plot puts above the
+    # figure and what names the dataset when several are compared, and a
+    # rebuilt dataset that drops it loses both.
+    for key, value in data.meta_items():
+        out.add_meta(key, value)
     out.validate()
 
     summary = f'{len(partners)} dependents against `{name}` ({good.sum()} points)'
