@@ -808,6 +808,10 @@ class AutoPlot(MPLPlotWidget):
 
         assert self.data is not None
 
+        # Set the font size for the size the canvas has now, before any artist
+        # is made: they are created at whatever `rcParams` says at that moment.
+        self.plot.applyFontSize(rescaleExisting=False)
+
         with FigureMaker(self.plot.fig) as fm:
             fm.plotType = self.plotType
             fm.style = self.plotStyle

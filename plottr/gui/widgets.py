@@ -5,7 +5,7 @@ Common GUI widgets that are re-used across plottr.
 """
 from typing import Union, List, Tuple, Optional, Sequence, Dict, Any, Type, Generic, TypeVar
 
-from .tools import dictToTreeWidgetItems, dpiScalingFactor
+from .tools import dictToTreeWidgetItems
 from plottr import QtGui, Flowchart, QtWidgets, Signal, Slot
 from plottr.node import Node, linearFlowchart
 from plottr.node.node import updateGuiQuietly, emitGuiUpdate
@@ -116,18 +116,14 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.setDefaultStyle()
 
     def setDefaultStyle(self) -> None:
-        fontSize = 10*dpiScalingFactor(self)
-        self.setStyleSheet(
-            f"""
-            QToolButton {{
-                font: {fontSize}px;
-            }}
+        """Window-specific styling.
 
-            QToolBar QCheckBox {{
-                font: {fontSize}px;
-            }}
-            """
-        )
+        The font sizes that used to be pinned here (``QToolButton``,
+        ``QToolBar QCheckBox``) are gone: they are more specific than the rule
+        that follows the window size (``plottr.gui.theme``), so they froze the
+        toolbar's text while everything around it scaled.
+        """
+        self.setStyleSheet('')
 
     def addNodeWidget(self, node: Node, **kwargs: Any) -> None:
         """

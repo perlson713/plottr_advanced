@@ -20,6 +20,27 @@ from plottr.gui.tools import widgetDialog, dpiScalingFactor
 from ..base import PlotWidget, PlotWidgetContainer
 
 
+#: Figure size (inches) the configured font size is meant for.  Matches
+#: ``figure.figsize`` in ``plottr/config``.
+REFERENCE_FIGURE_INCHES = (4.5, 3.0)
+
+#: Text in the figure grows more slowly than the figure, and within bounds --
+#: same reasoning as for the window's font (``plottr.gui.theme``).
+FIGURE_FONT_EXPONENT = 0.7
+FIGURE_FONT_RANGE = (0.8, 2.2)
+
+
+def figureFontScale(width: float, height: float) -> float:
+    """How much to grow the figure's text, for a figure of this size (inches)."""
+    if width <= 0 or height <= 0:
+        return 1.0
+    ratio = min(width / REFERENCE_FIGURE_INCHES[0],
+                height / REFERENCE_FIGURE_INCHES[1])
+    scale = ratio ** FIGURE_FONT_EXPONENT
+    low, high = FIGURE_FONT_RANGE
+    return max(low, min(high, scale))
+
+
 class MPLPlot(FCanvas):
     """
     This is the basic matplotlib canvas widget we are using for matplotlib
@@ -53,6 +74,10 @@ class MPLPlot(FCanvas):
         self._info = ''
         self._meta_info: Dict[str, str] = {}
         self._constrainedLayout = constrainedLayout
+        #: font size the configuration asks for, before the canvas is sized
+        self._baseFontSize = float(rcParams.get('font.size', 6))
+        #: font size the text currently in the figure was made at
+        self._fontSize = self._baseFontSize
 
         self.clearFig()
         self.setParent(parent)
@@ -76,15 +101,45 @@ class MPLPlot(FCanvas):
         cfg = plottrconfig().get('main', {}).get('matplotlibrc', {})
         for k, v in cfg.items():
             rcParams[k] = v
-        rcParams['font.size'] = cfg.get('font.size', 6) * dpiScalingFactor(self)
+        self._baseFontSize = cfg.get('font.size', 6) * dpiScalingFactor(self)
+        rcParams['font.size'] = self._baseFontSize
+        self._fontSize = self._baseFontSize
+
+    def applyFontSize(self, rescaleExisting: bool = True) -> None:
+        """Set the figure's font size from the size of the canvas.
+
+        A figure drawn at 6 pt is meant for a small panel; the same figure
+        filling a 27-inch screen has labels the size of a fingernail.  The
+        canvas knows how big it is, so the text follows it.
+
+        :param rescaleExisting: also resize the text already in the figure.
+            Every text in it came from the same base size, so multiplying them
+            all by the same factor keeps the proportions (title larger than
+            ticks, and so on).  Pass ``False`` when the figure is about to be
+            rebuilt anyway.
+        """
+        target = self._baseFontSize * figureFontScale(
+            self.fig.get_figwidth(), self.fig.get_figheight())
+        # rcParams is global: set it before anything is drawn, so that new
+        # artists in *this* figure are made at this size.
+        rcParams['font.size'] = target
+        if abs(target - self._fontSize) < 0.05:
+            return
+        if rescaleExisting and self._fontSize > 0:
+            ratio = target / self._fontSize
+            for text in self.fig.findobj(Text):
+                text.set_fontsize(text.get_fontsize() * ratio)
+        self._fontSize = target
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         """
         Re-implementation of the widget resizeEvent method.
         Makes sure we resize the plots appropriately.
         """
-        self.autosize()
+        # The canvas has the new size by now, so the figure knows how big it is.
         super().resizeEvent(event)
+        self.applyFontSize()
+        self.autosize()
 
     def setShowInfo(self, show: bool) -> None:
         """Whether to show additional info in the plot"""

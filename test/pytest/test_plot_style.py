@@ -195,3 +195,47 @@ def test_style_widget_shows_the_values_it_is_given(qtbot):
     assert widget.fitColor.currentData() == '#123456'
     # フォームを埋めただけで値が書き換わっていないこと
     assert style.markerSize == 4.0 and style.fitColor == '#123456'
+
+
+# ---------------------------------------------------------------------------
+# 図の中の文字は、キャンバスの大きさに合わせる。
+# ---------------------------------------------------------------------------
+
+
+def test_figure_font_scale_follows_the_canvas():
+    from plottr.plot.mpl.widgets import (FIGURE_FONT_RANGE,
+                                         REFERENCE_FIGURE_INCHES,
+                                         figureFontScale)
+
+    assert figureFontScale(*REFERENCE_FIGURE_INCHES) == pytest.approx(1.0)
+    assert figureFontScale(9.0, 6.0) > 1.0
+    assert figureFontScale(2.0, 1.5) < 1.0
+    # 横に広いだけの図では大きくしない
+    assert figureFontScale(20.0, 3.0) == figureFontScale(4.5, 3.0)
+    # 上下限
+    low, high = FIGURE_FONT_RANGE
+    assert figureFontScale(0.1, 0.1) >= low
+    assert figureFontScale(100.0, 100.0) <= high
+    assert figureFontScale(0.0, 0.0) == 1.0
+
+
+def test_plot_text_is_resized_with_the_canvas(plotWidget):
+    """再描画をまたいでも、今のキャンバスの大きさに合った文字になる。"""
+    data = DataDict(x=dict(unit='s'), y=dict(axes=['x']))
+    data.validate()
+    data.add_data(x=np.arange(10.0), y=np.arange(10.0) ** 2)
+    plotWidget.setData(data)
+
+    plot = plotWidget.plot
+    plot.fig.set_size_inches(4.5, 3.0)
+    plot.applyFontSize()
+    small = plot.fig.axes[0].xaxis.label.get_fontsize()
+
+    plot.fig.set_size_inches(12.0, 7.0)
+    plot.applyFontSize()
+    large = plot.fig.axes[0].xaxis.label.get_fontsize()
+    assert large > small
+
+    # 描き直しても大きいまま（rcParams が先に効く）
+    plotWidget.setData(data)
+    assert plot.fig.axes[0].xaxis.label.get_fontsize() == pytest.approx(large, rel=0.05)
