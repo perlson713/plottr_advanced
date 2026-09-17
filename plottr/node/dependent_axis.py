@@ -45,7 +45,8 @@ from ..gui.widgets import FormLayoutWrapper
 from .node import Node, NodeWidget, updateOption
 from .resonator import resonator_fit_module
 
-__all__ = ['DependentAsAxis', 'DependentAsAxisWidget']
+__all__ = ['DependentAsAxis', 'DependentAsAxisWidget',
+           'swapDependentToAxis']
 
 
 #: Tried in this order when the abscissa is left on '(automatic)'.
@@ -361,75 +362,98 @@ class DependentAsAxis(Node):
     def _swap(self, data: DataDictBase, abscissa: str) \
             -> Tuple[Optional[DataDictBase], str]:
         """Build a dataset with ``abscissa`` as its only axis."""
-        axes = list(data.axes(abscissa))
-        partners = [name for name in data.dependents()
-                    if name != abscissa and list(data.axes(name)) == axes]
+        return swapDependentToAxis(
+            data, abscissa, log=self._logAbscissa,
+            note=(None if self._appliedAttenuation is None
+                  else f'{self._appliedAttenuation:g} dB'))
 
-        # One row per point of the underlying axes.  `expand()` puts the
-        # dataset in one-record-per-row form whether it came from a ddh5
-        # (where a record is a whole trace) or not; the per-power values are
-        # then simply repeated, so keep the first row of each group.
-        work = data.expand()
-        if axes:
-            keys = np.stack(
-                [np.asarray(work.data_vals(a)).flatten() for a in axes], axis=-1)
-            _, index = np.unique(keys, axis=0, return_index=True)
-            index = np.sort(index)
-        else:
-            index = np.arange(np.asarray(work.data_vals(abscissa)).size)
 
-        x = np.asarray(work.data_vals(abscissa), dtype=float).flatten()[index]
+def swapDependentToAxis(data: DataDictBase, abscissa: str, log: bool = True,
+                        note: Optional[str] = None) \
+        -> Tuple[Optional[DataDictBase], str]:
+    """Build a dataset with ``abscissa`` (a dependent) as its only axis.
 
-        name = abscissa
-        unit = data.get(abscissa, {}).get('unit', '')
-        label = data.label(abscissa) or abscissa
-        if self._appliedAttenuation is not None:
-            # Say it on the axis, not only in the status line.  Ten dB moves
-            # log10(photon) by exactly one, and the plot rescales itself, so
-            # the curve looks unchanged and only the tick labels move -- which
-            # reads as "typing the attenuation did nothing".  It also keeps the
-            # assumption with the figure when it is saved or shown to someone.
-            label = f'{label} @ {self._appliedAttenuation:g} dB'
-        if self._logAbscissa:
-            with np.errstate(divide='ignore', invalid='ignore'):
-                x = np.log10(x)
-            name = f'log10_{abscissa}'
-            label = f'log10({label})'
-            unit = ''
+    Free function rather than a method because the same transformation has to
+    be applied to datasets that are joined in later (``dataset_join``): a file
+    added to a plot whose x axis is ``log10_photon`` has to arrive in that same
+    shape, and doing it twice would be two things to keep in step.
 
-        # A point with no abscissa cannot be placed.  Points whose *dependents*
-        # are NaN are kept: a power where the fit failed is a real gap, and
-        # hiding it would misrepresent the sweep.
-        good = np.isfinite(x)
-        dropped = int((~good).sum())
-        if not good.any():
-            reason = (f'`{abscissa}` is NaN at every point.'
-                      if dropped == x.size else '')
-            if abscissa == 'photon':
-                reason += (' The measurement script can only compute the photon '
-                           'number when `line_attenuation_db` is set (in the '
-                           'measurement config, or in the setup file); without '
-                           'it the column is all NaN.  Type the attenuation in '
-                           'dB into this node to recompute it -- the '
-                           'measurement does not have to be repeated.')
-            return None, ('Nothing to plot: ' + reason).strip()
+    :param abscissa: the dependent to turn into the axis.
+    :param log: emit ``log10`` of it, under the name ``log10_<abscissa>``.
+    :param note: appended to the axis label in parentheses-free form, e.g. the
+        line attenuation the photon number was computed with.
+    :return: the new dataset (``None`` if nothing could be plotted) and a
+        one-line description of what happened.
+    """
+    axes = list(data.axes(abscissa))
+    partners = [name for name in data.dependents()
+                if name != abscissa and list(data.axes(name)) == axes]
 
-        order = np.argsort(x[good], kind='stable')
+    # One row per point of the underlying axes.  `expand()` puts the dataset in
+    # one-record-per-row form whether it came from a ddh5 (where a record is a
+    # whole trace) or not; the per-power values are then simply repeated, so
+    # keep the first row of each group.
+    work = data.expand()
+    if axes:
+        keys = np.stack(
+            [np.asarray(work.data_vals(a)).flatten() for a in axes], axis=-1)
+        _, index = np.unique(keys, axis=0, return_index=True)
+        index = np.sort(index)
+    else:
+        index = np.arange(np.asarray(work.data_vals(abscissa)).size)
 
-        out = DataDict()
-        out[name] = dict(values=x[good][order], axes=[], unit=unit, label=label)
-        for partner in partners:
-            values = np.asarray(
-                work.data_vals(partner), dtype=float).flatten()[index]
-            out[partner] = dict(
-                values=values[good][order],
-                axes=[name],
-                unit=data.get(partner, {}).get('unit', ''),
-                label=data.get(partner, {}).get('label', ''),
-            )
-        out.validate()
+    x = np.asarray(work.data_vals(abscissa), dtype=float).flatten()[index]
 
-        note = f'{len(partners)} dependents against `{name}` ({good.sum()} points)'
-        if dropped:
-            note += f'; {dropped} dropped where `{abscissa}` was not finite'
-        return out, note
+    name = abscissa
+    unit = data.get(abscissa, {}).get('unit', '')
+    label = data.label(abscissa) or abscissa
+    if note:
+        # Say it on the axis, not only in the status line.  Ten dB moves
+        # log10(photon) by exactly one, and the plot rescales itself, so the
+        # curve looks unchanged and only the tick labels move -- which reads as
+        # "typing the attenuation did nothing".  It also keeps the assumption
+        # with the figure when it is saved or shown to someone.
+        label = f'{label} @ {note}'
+    if log:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            x = np.log10(x)
+        name = f'log10_{abscissa}'
+        label = f'log10({label})'
+        unit = ''
+
+    # A point with no abscissa cannot be placed.  Points whose *dependents* are
+    # NaN are kept: a power where the fit failed is a real gap, and hiding it
+    # would misrepresent the sweep.
+    good = np.isfinite(x)
+    dropped = int((~good).sum())
+    if not good.any():
+        reason = (f'`{abscissa}` is NaN at every point.'
+                  if dropped == x.size else '')
+        if abscissa == 'photon':
+            reason += (' The measurement script can only compute the photon '
+                       'number when `line_attenuation_db` is set (in the '
+                       'measurement config, or in the setup file); without '
+                       'it the column is all NaN.  Type the attenuation in '
+                       'dB into this node to recompute it -- the '
+                       'measurement does not have to be repeated.')
+        return None, ('Nothing to plot: ' + reason).strip()
+
+    order = np.argsort(x[good], kind='stable')
+
+    out = DataDict()
+    out[name] = dict(values=x[good][order], axes=[], unit=unit, label=label)
+    for partner in partners:
+        values = np.asarray(
+            work.data_vals(partner), dtype=float).flatten()[index]
+        out[partner] = dict(
+            values=values[good][order],
+            axes=[name],
+            unit=data.get(partner, {}).get('unit', ''),
+            label=data.get(partner, {}).get('label', ''),
+        )
+    out.validate()
+
+    summary = f'{len(partners)} dependents against `{name}` ({good.sum()} points)'
+    if dropped:
+        summary += f'; {dropped} dropped where `{abscissa}` was not finite'
+    return out, summary
