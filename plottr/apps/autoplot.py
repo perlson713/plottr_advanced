@@ -22,6 +22,7 @@ from ..node.scaleunits import ScaleUnits
 from ..node.grid import DataGridder, GridOption
 from ..node.tools import linearFlowchart
 from ..node.node import Node
+from ..gui.theme import applyTheme
 from ..node.histogram import Histogrammer
 from ..node.resonator import ResonatorFit
 from ..node.dependent_axis import DependentAsAxis
@@ -413,6 +414,7 @@ def autoplotDDH5App(*args: Any) -> Tuple[Flowchart, AutoPlotMainWindow]:
 
 def main(f: str, g: str) -> int:
     app = QtWidgets.QApplication([])
+    applyTheme(app)
     fc, win = autoplotDDH5(f, g)
 
     return app.exec_()

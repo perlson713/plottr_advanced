@@ -30,6 +30,7 @@ from .. import log as plottrlog
 from ..data.qcodes_dataset import (get_runs_from_db_as_dataframe,
                                    get_ds_structure, load_dataset_from)
 from plottr.gui.widgets import MonitorIntervalInput, FormLayoutWrapper, dictToTreeWidgetItems
+from plottr.gui.theme import applyTheme
 
 from .autoplot import autoplotQcodesDataset, QCAutoPlotMainWindow
 
@@ -659,6 +660,7 @@ def inspectr(dbPath: Optional[str] = None) -> QCodesDBInspector:
 
 def main(dbPath: Optional[str], log_level: Union[int, str] = logging.WARNING) -> None:
     app = QtWidgets.QApplication([])
+    applyTheme(app)
     plottrlog.enableStreamHandler(True, log_level)
 
     win = inspectr(dbPath=dbPath)

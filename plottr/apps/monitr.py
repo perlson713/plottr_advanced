@@ -40,6 +40,7 @@ from ..data.datadict_storage import datadict_from_hdf5
 from ..data.datadict import DataDict
 from ..apps.watchdog_classes import WatcherClient
 from ..gui.widgets import Collapsible
+from ..gui.theme import applyTheme
 from .json_viewer import JsonModel, JsonTreeView
 from ..icons import (
     get_starIcon as get_star_icon,
@@ -3846,6 +3847,7 @@ def script() -> int:
         sys.exit()
 
     app = QtWidgets.QApplication([])
+    applyTheme(app)
     win = Monitr(path)
     win.show()
     return app.exec_()
