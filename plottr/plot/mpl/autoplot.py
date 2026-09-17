@@ -12,7 +12,7 @@ from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from matplotlib.cm import ScalarMappable
 
-from plottr import QtWidgets, QtCore, Signal, Slot
+from plottr import QtWidgets, QtCore, QtGui, Signal, Slot
 from plottr.data.datadict import DataDictBase
 from plottr.icons import (get_singleTracePlotIcon, get_multiTracePlotIcon, get_imagePlotIcon,
                           get_colormeshPlotIcon, get_scatterPlot2dIcon)
@@ -22,9 +22,63 @@ from .widgets import MPLPlotWidget
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, PlotWidgetContainer, \
     ERROR_BAR_AUTO, ERROR_BAR_NONE, errorBarData, errorBarDataNames, \
-    plottableDependents
+    plottableDependents, fitSourceName, sortFitsLast
 
 logger = logging.getLogger(__name__)
+
+
+#: The fit curve is drawn with this much more z than the data it belongs to,
+#: so that it sits on top of the markers instead of under them.
+FIT_ZORDER_BOOST = 0.5
+
+#: ``fitColor`` value meaning "whatever color the data got".
+FIT_COLOR_AUTO = ''
+
+
+class PlotStyle:
+    """How the traces are drawn: point size, line widths, fit color.
+
+    The defaults come from the matplotlib settings in ``plottr/config`` so that
+    the config file stays the one place to change the overall look; the toolbar
+    moves them per plot from there.
+    """
+
+    def __init__(self) -> None:
+        import matplotlib as mpl
+
+        #: marker size of the data points (0 draws no markers)
+        self.markerSize: float = float(mpl.rcParams.get('lines.markersize', 3))
+        #: width of the line through the data points (0 draws no line)
+        self.lineWidth: float = float(mpl.rcParams.get('lines.linewidth', 1))
+        #: width of a fit curve.  Thicker than the data by default: it is the
+        #: line the eye is meant to follow.
+        self.fitLineWidth: float = self.lineWidth * 1.5
+        #: color of fit curves; empty means "same as the data it fits"
+        self.fitColor: str = FIT_COLOR_AUTO
+
+    def dataOptions(self) -> Dict[str, Any]:
+        """matplotlib keyword arguments for a measured trace."""
+        options: Dict[str, Any] = {
+            'markersize': self.markerSize,
+            'linewidth': self.lineWidth,
+        }
+        if self.markerSize <= 0:
+            options['marker'] = ''
+        return options
+
+    def fitOptions(self) -> Dict[str, Any]:
+        """matplotlib keyword arguments for a fit curve.
+
+        A fit is a model, not a measurement: it gets no markers, so that the
+        points on the plot are the ones that were actually measured.
+        """
+        options: Dict[str, Any] = {
+            'marker': '',
+            'linewidth': self.fitLineWidth,
+        }
+        if self.fitColor:
+            options['color'] = self.fitColor
+        return options
 
 class FigureMaker(BaseFM):
     """Matplotlib implementation for :class:`.AutoFigureMaker`.
@@ -43,6 +97,13 @@ class FigureMaker(BaseFM):
         #: what kind of plot we're making. needs to be set before adding data.
         #: Incompatibility with the data provided will result in failure.
         self.plotType = PlotType.empty
+
+        #: point size, line widths and fit color
+        self.style = PlotStyle()
+
+        #: color assigned to each measured trace, so its fit can reuse it.
+        #: Keyed by (subplot, half of a complex trace, name).
+        self._traceColors: Dict[Tuple[int, int, str], str] = {}
 
     # re-implementing to get correct type annotation.
     def __enter__(self) -> "FigureMaker":
@@ -127,7 +188,32 @@ class FigureMaker(BaseFM):
         assert plotItem.plotOptions is not None
         plotOptions = plotItem.plotOptions.copy()
         yerr = plotOptions.pop('_errorBarData', None)
-        line = axes[0].plot(x, y, label=lbl, **plotOptions)
+
+        # Private keys, set by _plotData and by the complex-data split; they
+        # describe the trace rather than how to draw it, so matplotlib never
+        # sees them.
+        name = plotOptions.pop('_name', '')
+        fitOf = plotOptions.pop('_fitOf', None)
+        part = int(plotOptions.pop('_part', 0))
+        key = (plotItem.subPlot, part, fitOf or name)
+
+        if fitOf is None:
+            style = dict(self.style.dataOptions())
+        else:
+            style = dict(self.style.fitOptions())
+            if 'color' not in style:
+                # Same color as the data it fits, so the pair reads as one
+                # thing.  The data is always plotted first (sortFitsLast).
+                color = self._traceColors.get(key)
+                if color is not None:
+                    style['color'] = color
+            # ... and on top of the markers, not under them.
+            style['zorder'] = 2 + FIT_ZORDER_BOOST
+        style.update(plotOptions)  # an explicit option always wins
+
+        line = axes[0].plot(x, y, label=lbl, **style)
+        if fitOf is None and name and len(line) > 0:
+            self._traceColors[key] = line[0].get_color()
         if yerr is not None:
             axes[0].errorbar(x, y, yerr=yerr, fmt='none',
                              ecolor=line[0].get_color(), capsize=2)
@@ -145,6 +231,116 @@ class FigureMaker(BaseFM):
         lbl = plotItem.labels[-1] if isinstance(plotItem.labels, list) and len(plotItem.labels) > 0 else ''
         cb.set_label(lbl)
         return im
+
+
+class PlotStyleWidget(QtWidgets.QWidget):
+    """Form for point size, line widths and fit color.
+
+    It edits a :class:`PlotStyle` in place and says so with :attr:`changed`;
+    the plot widget redraws on that.
+    """
+
+    #: emitted after any of the values changed
+    changed = Signal()
+
+    #: fit colors offered by name, on top of "same as the data"
+    COLORS = (
+        ('Same as data', FIT_COLOR_AUTO),
+        ('Black', 'k'),
+        ('Red', '#d62728'),
+        ('Blue', '#1f77b4'),
+        ('Orange', '#ff7f0e'),
+        ('Green', '#2ca02c'),
+        ('Grey', '#7f7f7f'),
+    )
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self._style: Optional[PlotStyle] = None
+
+        self.pointSize = QtWidgets.QDoubleSpinBox()
+        self.pointSize.setRange(0.0, 30.0)
+        self.pointSize.setSingleStep(0.5)
+        self.pointSize.setToolTip('Size of the data points.  0 hides them.')
+
+        self.lineWidth = QtWidgets.QDoubleSpinBox()
+        self.lineWidth.setRange(0.0, 10.0)
+        self.lineWidth.setSingleStep(0.25)
+        self.lineWidth.setToolTip(
+            'Thickness of the line through the data points.  0 leaves the '
+            'points on their own.')
+
+        self.fitLineWidth = QtWidgets.QDoubleSpinBox()
+        self.fitLineWidth.setRange(0.0, 10.0)
+        self.fitLineWidth.setSingleStep(0.25)
+        self.fitLineWidth.setToolTip('Thickness of the fit curves.')
+
+        self.fitColor = QtWidgets.QComboBox()
+        for name, value in self.COLORS:
+            self.fitColor.addItem(name, value)
+        self.fitColor.addItem('Custom...', None)
+        self.fitColor.setToolTip(
+            'Color of the fit curves.  By default each fit takes the color of '
+            'the trace it belongs to, so the pair reads as one thing.')
+
+        form = QtWidgets.QFormLayout(self)
+        form.addRow('Point size', self.pointSize)
+        form.addRow('Line width', self.lineWidth)
+        form.addRow('Fit width', self.fitLineWidth)
+        form.addRow('Fit color', self.fitColor)
+
+        self.pointSize.valueChanged.connect(self._apply)
+        self.lineWidth.valueChanged.connect(self._apply)
+        self.fitLineWidth.valueChanged.connect(self._apply)
+        self.fitColor.currentIndexChanged.connect(self._colorChosen)
+
+    def setStyle(self, style: 'PlotStyle') -> None:
+        """Show the values of ``style``, and edit that object from now on."""
+        self._style = None  # do not write back while filling the form in
+        self.pointSize.setValue(style.markerSize)
+        self.lineWidth.setValue(style.lineWidth)
+        self.fitLineWidth.setValue(style.fitLineWidth)
+        self._showColor(style.fitColor)
+        self._style = style
+
+    def _showColor(self, color: str) -> None:
+        index = self.fitColor.findData(color)
+        if index < 0:
+            # A custom color: keep one entry for it rather than growing the
+            # list every time the operator picks another one.
+            index = self.fitColor.findText('Custom color')
+            if index < 0:
+                self.fitColor.insertItem(0, 'Custom color', color)
+                index = 0
+            else:
+                self.fitColor.setItemData(index, color)
+        self.fitColor.setCurrentIndex(index)
+
+    @Slot()
+    def _colorChosen(self) -> None:
+        if self._style is None:
+            return
+        value = self.fitColor.currentData()
+        if value is None:  # the "Custom..." entry
+            current = QtGui.QColor(self._style.fitColor or '#000000')
+            chosen = QtWidgets.QColorDialog.getColor(
+                current, self, 'Fit curve color')
+            if not chosen.isValid():
+                self._showColor(self._style.fitColor)
+                return
+            value = chosen.name()
+            self._showColor(value)
+        self._style.fitColor = str(value)
+        self.changed.emit()
+
+    @Slot()
+    def _apply(self) -> None:
+        if self._style is None:
+            return
+        self._style.markerSize = self.pointSize.value()
+        self._style.lineWidth = self.lineWidth.value()
+        self._style.fitLineWidth = self.fitLineWidth.value()
+        self.changed.emit()
 
 
 # A toolbar for setting options on the MPL autoplot
@@ -167,6 +363,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
     #: signal emitted when an error-bar source has been selected
     errorBarSourceSelected = Signal(str, str)
+
+    #: signal emitted when point size, line width or fit color have changed
+    plotStyleChanged = Signal()
 
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
@@ -250,6 +449,27 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.addWidget(self.errorBarButton)
         self._errorBarMenuRefs: List[Any] = []
 
+        # Point size, line widths and fit color.  These live behind one button
+        # rather than as four more widgets in the row: the toolbar is already
+        # long, and these are set once and then left alone.
+        self.addSeparator()
+        self.styleWidget = PlotStyleWidget(self)
+        self.styleWidget.changed.connect(self.plotStyleChanged)
+        styleMenu = QtWidgets.QMenu(parent=self)
+        styleAction = QtWidgets.QWidgetAction(styleMenu)
+        styleAction.setDefaultWidget(self.styleWidget)
+        styleMenu.addAction(styleAction)
+        self.styleButton = QtWidgets.QToolButton()
+        self.styleButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.styleButton.setText('Style')
+        self.styleButton.setToolTip(
+            'Size of the data points, thickness of the lines, and the color of '
+            'the fit curves.')
+        self.styleButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.styleButton.setMenu(styleMenu)
+        self.addWidget(self.styleButton)
+        self._styleMenu = styleMenu
+
         self.plotTypeActions = OrderedDict({
             PlotType.multitraces: self.plotasMultiTraces,
             PlotType.singletraces: self.plotasSingleTraces,
@@ -272,6 +492,10 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self._currentComplex = ComplexRepresentation.realAndImag
         self.ComplexActions[self._currentComplex].setChecked(True)
         self._currentlyAllowedComplexTypes: Tuple[ComplexRepresentation, ...] = ()
+
+    def setPlotStyle(self, style: 'PlotStyle') -> None:
+        """Hand the style object the toolbar edits in place."""
+        self.styleWidget.setStyle(style)
 
     def setErrorBarOptions(
         self, data: Optional[DataDictBase], sources: Optional[Dict[str, str]] = None
@@ -446,6 +670,8 @@ class AutoPlot(MPLPlotWidget):
         self.complexRepresentation = ComplexRepresentation.realAndImag
         self.showErrorBars = True
         self.errorBarSources: Dict[str, str] = {}
+        #: point size, line widths and fit color; the toolbar edits this
+        self.plotStyle = PlotStyle()
 
         # A toolbar for configuring the plot
         self.plotOptionsToolBar = AutoPlotToolBar('Plot options', self)
@@ -464,6 +690,10 @@ class AutoPlot(MPLPlotWidget):
         self.plotOptionsToolBar.errorBarSourceSelected.connect(
             self._errorBarSourceFromToolBar
         )
+        self.plotOptionsToolBar.plotStyleChanged.connect(
+            self._plotStyleFromToolBar
+        )
+        self.plotOptionsToolBar.setPlotStyle(self.plotStyle)
 
         scaling = dpiScalingFactor(self)
         iconSize = int(36 + 8*(scaling - 1))
@@ -541,6 +771,11 @@ class AutoPlot(MPLPlotWidget):
             self.showErrorBars = showErrorBars
             self._plotData()
 
+    @Slot()
+    def _plotStyleFromToolBar(self) -> None:
+        """Redraw with the point size / line widths / fit color from the toolbar."""
+        self._plotData()
+
     @Slot(str, str)
     def _errorBarSourceFromToolBar(self, dependent: str, source: str) -> None:
         if self.errorBarSources.get(dependent, ERROR_BAR_AUTO) != source:
@@ -575,17 +810,24 @@ class AutoPlot(MPLPlotWidget):
 
         with FigureMaker(self.plot.fig) as fm:
             fm.plotType = self.plotType
+            fm.style = self.plotStyle
             if not self.dataIsComplex():
                 fm.complexRepresentation = ComplexRepresentation.real
             else:
                 fm.complexRepresentation = self.complexRepresentation
 
             indeps = self.data.axes()
-            for dn in plottableDependents(self.data, self.errorBarSources):
+            # Fit curves last: they take their color from the data they belong
+            # to, and they are drawn on top of it.
+            for dn in sortFitsLast(
+                    self.data, plottableDependents(self.data, self.errorBarSources)):
                 dvals = self.data.data_vals(dn)
                 source = self.errorBarSources.get(dn, ERROR_BAR_AUTO)
                 yerr = errorBarData(self.data, dn, source) if self.showErrorBars else None
-                kw: Dict[str, Any] = {}
+                kw: Dict[str, Any] = {'_name': dn}
+                fitOf = fitSourceName(self.data, dn)
+                if fitOf is not None:
+                    kw['_fitOf'] = fitOf
                 if yerr is not None:
                     kw['_errorBarData'] = yerr
                 plotId = fm.addData(

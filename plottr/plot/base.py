@@ -350,6 +350,46 @@ def errorBarData(
     return error_values
 
 
+#: Marks a dependent as the fitted model of another one.  The measurement
+#: scripts save the fit of ``<trace>`` as ``<trace>_fit``, and the calibrated
+#: pair as ``<trace>_cor`` / ``<trace>_cor_fit``; the older punchout script
+#: writes ``s21_normalized`` / ``s21_fit_normalized``.  Removing the marker
+#: from the name gives the measured trace in every one of those.
+FIT_MARKER = '_fit'
+
+
+def fitSourceName(data: DataDictBase, dependent: str) -> Optional[str]:
+    """The measured trace a fit curve belongs to, or ``None``.
+
+    A fit curve is drawn over its data, in the same color, so the two have to
+    be paired up.  The pairing is by name only -- no knowledge of the model --
+    and a name that does not resolve to a field in the dataset is not treated
+    as a fit.
+    """
+    if FIT_MARKER not in dependent:
+        return None
+    source = dependent.replace(FIT_MARKER, '', 1)
+    if source and source != dependent and source in data:
+        return source
+    return None
+
+
+def isFitData(data: DataDictBase, dependent: str) -> bool:
+    """Whether this dependent is the fitted model of another one."""
+    return fitSourceName(data, dependent) is not None
+
+
+def sortFitsLast(data: DataDictBase, dependents: List[str]) -> List[str]:
+    """Order dependents so that fit curves are drawn after their data.
+
+    Two reasons: the fit takes its color from the data it belongs to, so the
+    data has to be drawn first; and drawing it later puts the line on top of
+    the points, which is where it belongs -- a fit hidden under the markers
+    cannot be judged.
+    """
+    return sorted(dependents, key=lambda name: isFitData(data, name))
+
+
 def plottableDependents(
     data: DataDictBase, errorBarSources: Optional[Dict[str, str]] = None
 ) -> List[str]:
@@ -730,7 +770,13 @@ class AutoFigureMaker:
         plotItem = PlotItem(list(data), id, subPlotId,
                             plotDataType, labels, plotOptions)
 
-        for p in self._splitComplexData(plotItem):
+        for part, p in enumerate(self._splitComplexData(plotItem)):
+            # Which half of a complex trace this is (0/1, or 0 when the data is
+            # real).  A fit of the same trace splits the same way, so this is
+            # what lets the fit of the imaginary part take the color of the
+            # imaginary part rather than of the real one.
+            if p.plotOptions is not None:
+                p.plotOptions = dict(p.plotOptions, _part=part)
             self.plotItems[p.id] = p
             self.allPlotIds.append(p.id)
         self.plotIds.append(id)
