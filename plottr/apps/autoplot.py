@@ -362,6 +362,10 @@ def autoplotDDH5(filepath: str = '',
         ('Grid', DataGridder),
         ('Histogram', Histogrammer),
         ('Dimension assignment', XYSelector),
+        # Hz -> GHz, s -> ns, and so on.  A resonator sits at 12.579 GHz; an
+        # axis in bare Hz is 11 digits the eye has to count.  The qcodes
+        # flowchart has had this node all along; ddh5 data went without.
+        ('Scale units', ScaleUnits),
         ('plot', PlotNode)
     )
 
@@ -378,6 +382,8 @@ def autoplotDDH5(filepath: str = '',
                           dockArea=QtCore.Qt.TopDockWidgetArea),
         "Dimension assignment": dict(visible=True,
                                      dockArea=QtCore.Qt.TopDockWidgetArea),
+        "Scale units": dict(visible=False,
+                            dockArea=QtCore.Qt.TopDockWidgetArea),
     }
 
     win = AutoPlotMainWindow(fc, loaderName='Data loader',
