@@ -34,6 +34,18 @@ FIT_ZORDER_BOOST = 0.5
 #: ``fitColor`` value meaning "whatever color the data got".
 FIT_COLOR_AUTO = ''
 
+#: Axis scales the toolbar offers.
+AXIS_SCALES = (('Linear', 'linear'), ('Log', 'log'))
+
+
+def _hasPositiveValues(values: Any) -> bool:
+    """Whether a log axis can show this data at all."""
+    array = np.asanyarray(values)
+    if not np.issubdtype(array.dtype, np.number):
+        return False
+    with np.errstate(invalid='ignore'):
+        return bool(np.any(np.isfinite(array) & (array > 0)))
+
 
 class PlotStyle:
     """How the traces are drawn: point size, line widths, fit color.
@@ -101,6 +113,10 @@ class FigureMaker(BaseFM):
         #: point size, line widths and fit color
         self.style = PlotStyle()
 
+        #: scale of the x and y axes ('linear' or 'log')
+        self.xScale = 'linear'
+        self.yScale = 'linear'
+
         #: color assigned to each measured trace, so its fit can reuse it.
         #: Keyed by (subplot, half of a complex trace, name).
         self._traceColors: Dict[Tuple[int, int, str], str] = {}
@@ -163,7 +179,34 @@ class FigureMaker(BaseFM):
         if isinstance(axes, list) and len(axes) > 1:
             if len(labels) > 2 and len(set(labels[2])) == 1:
                 axes[1].set_ylabel(labels[2][0])
+
+        if isinstance(axes, list):
+            for ax in axes:
+                self.applyAxisScales(subPlotId, ax)
         return None
+
+    def applyAxisScales(self, subPlotId: int, ax: Axes) -> None:
+        """Put the chosen scales on one set of axes.
+
+        Only 1d plots: on an image the axes are the pixel grid, where a log
+        scale means nothing.  A log scale is also skipped where the data has no
+        positive values at all -- matplotlib would happily draw an empty plot,
+        which looks like a bug rather than like a wrong choice of scale.
+        """
+        items = [self.plotItems[i] for i in self.plotIdsInSubPlot(subPlotId)]
+        lines = [item for item in items if len(item.data) == 2]
+        if not lines:
+            return
+
+        for scale, index, setter in ((self.xScale, 0, ax.set_xscale),
+                                     (self.yScale, 1, ax.set_yscale)):
+            if scale != 'log':
+                setter('linear')
+                continue
+            if any(_hasPositiveValues(item.data[index]) for item in lines):
+                setter('log')
+            else:
+                setter('linear')
 
     def plot(self, plotItem: PlotItem) -> Optional[Union[ScalarMappable, List[ScalarMappable]]]:
         """Plots data in a PlotItem.
@@ -367,6 +410,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
     #: signal emitted when point size, line width or fit color have changed
     plotStyleChanged = Signal()
 
+    #: signal emitted when an axis scale has been changed (x scale, y scale)
+    axisScaleSelected = Signal(str, str)
+
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
 
@@ -470,6 +516,36 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.addWidget(self.styleButton)
         self._styleMenu = styleMenu
 
+        # Linear or logarithmic axes.  Qi against the photon number is read on
+        # a log x axis; so is anything spanning decades.
+        self.xScaleBox = QtWidgets.QComboBox()
+        self.yScaleBox = QtWidgets.QComboBox()
+        for box in (self.xScaleBox, self.yScaleBox):
+            for name, value in AXIS_SCALES:
+                box.addItem(name, value)
+            box.currentIndexChanged.connect(self._emitAxisScales)
+        self.xScaleBox.setToolTip(
+            'Scale of the x axis.  A log scale is ignored where the data has '
+            'no positive values.')
+        self.yScaleBox.setToolTip('Scale of the y axis.')
+
+        scaleForm = QtWidgets.QWidget()
+        scaleLayout = QtWidgets.QFormLayout(scaleForm)
+        scaleLayout.addRow('x axis', self.xScaleBox)
+        scaleLayout.addRow('y axis', self.yScaleBox)
+        scaleMenu = QtWidgets.QMenu(parent=self)
+        scaleAction = QtWidgets.QWidgetAction(scaleMenu)
+        scaleAction.setDefaultWidget(scaleForm)
+        scaleMenu.addAction(scaleAction)
+        self.scaleButton = QtWidgets.QToolButton()
+        self.scaleButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.scaleButton.setText('Scale')
+        self.scaleButton.setToolTip('Linear or logarithmic axes.')
+        self.scaleButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.scaleButton.setMenu(scaleMenu)
+        self.addWidget(self.scaleButton)
+        self._scaleMenu = scaleMenu
+
         self.plotTypeActions = OrderedDict({
             PlotType.multitraces: self.plotasMultiTraces,
             PlotType.singletraces: self.plotasSingleTraces,
@@ -492,6 +568,20 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self._currentComplex = ComplexRepresentation.realAndImag
         self.ComplexActions[self._currentComplex].setChecked(True)
         self._currentlyAllowedComplexTypes: Tuple[ComplexRepresentation, ...] = ()
+
+    @Slot()
+    def _emitAxisScales(self) -> None:
+        self.axisScaleSelected.emit(str(self.xScaleBox.currentData()),
+                                    str(self.yScaleBox.currentData()))
+
+    def setAxisScales(self, xScale: str, yScale: str) -> None:
+        """Show these scales without emitting anything."""
+        for box, value in ((self.xScaleBox, xScale), (self.yScaleBox, yScale)):
+            index = box.findData(value)
+            if index >= 0:
+                box.blockSignals(True)
+                box.setCurrentIndex(index)
+                box.blockSignals(False)
 
     def setPlotStyle(self, style: 'PlotStyle') -> None:
         """Hand the style object the toolbar edits in place."""
@@ -672,6 +762,9 @@ class AutoPlot(MPLPlotWidget):
         self.errorBarSources: Dict[str, str] = {}
         #: point size, line widths and fit color; the toolbar edits this
         self.plotStyle = PlotStyle()
+        #: scale of the x and y axes ('linear' or 'log')
+        self.xScale = 'linear'
+        self.yScale = 'linear'
 
         # A toolbar for configuring the plot
         self.plotOptionsToolBar = AutoPlotToolBar('Plot options', self)
@@ -694,6 +787,10 @@ class AutoPlot(MPLPlotWidget):
             self._plotStyleFromToolBar
         )
         self.plotOptionsToolBar.setPlotStyle(self.plotStyle)
+        self.plotOptionsToolBar.axisScaleSelected.connect(
+            self._axisScalesFromToolBar
+        )
+        self.plotOptionsToolBar.setAxisScales(self.xScale, self.yScale)
 
         scaling = dpiScalingFactor(self)
         iconSize = int(36 + 8*(scaling - 1))
@@ -771,6 +868,12 @@ class AutoPlot(MPLPlotWidget):
             self.showErrorBars = showErrorBars
             self._plotData()
 
+    @Slot(str, str)
+    def _axisScalesFromToolBar(self, xScale: str, yScale: str) -> None:
+        if (xScale, yScale) != (self.xScale, self.yScale):
+            self.xScale, self.yScale = xScale, yScale
+            self._plotData()
+
     @Slot()
     def _plotStyleFromToolBar(self) -> None:
         """Redraw with the point size / line widths / fit color from the toolbar."""
@@ -815,6 +918,7 @@ class AutoPlot(MPLPlotWidget):
         with FigureMaker(self.plot.fig) as fm:
             fm.plotType = self.plotType
             fm.style = self.plotStyle
+            fm.xScale, fm.yScale = self.xScale, self.yScale
             if not self.dataIsComplex():
                 fm.complexRepresentation = ComplexRepresentation.real
             else:
