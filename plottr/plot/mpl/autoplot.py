@@ -890,6 +890,17 @@ class AutoPlot(MPLPlotWidget):
             self.xScale, self.yScale = xScale, yScale
             self._plotData()
 
+    def _clearPlot(self) -> None:
+        """Empty the figure.
+
+        Leaving the previous figure up when there is nothing to draw is worse
+        than an empty panel: it shows numbers from a dataset that is no longer
+        selected, and every change looks as though it did nothing.
+        """
+        if self.plot.fig.axes:
+            self.plot.clearFig()
+            self.updatePlot()
+
     @Slot()
     def _plotStyleFromToolBar(self) -> None:
         """Redraw with the point size / line widths / fit color from the toolbar."""
@@ -920,9 +931,11 @@ class AutoPlot(MPLPlotWidget):
 
         if self.plotDataType is PlotDataType.unknown:
             logger.debug("No plottable data.")
+            self._clearPlot()
             return
         if self.plotType is PlotType.empty:
             logger.debug("No plot routine determined.")
+            self._clearPlot()
             return
 
         assert self.data is not None

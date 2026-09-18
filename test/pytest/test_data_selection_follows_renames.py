@@ -41,8 +41,8 @@ def test_selection_is_kept_when_nothing_was_renamed():
     available = ['Qi', 'Ql', 'Qc']
     assert matchSelection(['Qi', 'Ql'], available) == ['Qi', 'Ql']
     assert matchSelection([], available) == []
-    # 消えた列は諦める（作り出さない）
-    assert matchSelection(['nothing'], available) == []
+    # 消えた列に対応するものが無ければ、そこにあるものを出す（下のテスト）
+    assert matchSelection(['nothing'], available) == ['Qi']
 
 
 def _flowchart():
@@ -113,3 +113,40 @@ def test_other_quantities_are_not_dragged_in():
     assert matchSelection(['Qi'], available) == ['Qi [A]', 'Qi [B]']
     assert matchSelection(['Qi', 'Ql'], available) == [
         'Qi [A]', 'Qi [B]', 'Ql [A]', 'Ql [B]']
+
+
+def test_something_is_shown_when_the_selection_has_no_counterpart():
+    """比較は 1 つの量だけを残すので、選んでいた列が残っていないことがある。
+    そのとき空にすると、一覧には列が並んでいるのに図が古いまま（あるいは空）で、
+    操作が効いていないように見える。**そこにあるものを全系列**出す。"""
+    available = ['Qi [A]', 'Qi [A]_err', 'Qi [B]', 'Qi [B]_err']
+    assert matchSelection(['Qc'], available) == ['Qi [A]', 'Qi [B]']
+
+    # 選択できるものが誤差の列しかなければ、それを 1 つ
+    assert matchSelection(['Qc'], ['Qi [A]_err']) == ['Qi [A]_err']
+    # 何も無ければ何も選ばない
+    assert matchSelection(['Qc'], []) == []
+
+
+def test_the_plot_is_cleared_when_there_is_nothing_to_draw(qtbot):
+    """空の図の方が、古いデータの図より正しい。"""
+    import numpy as np
+    from plottr.plot.base import PlotWidgetContainer
+    from plottr.plot.mpl.autoplot import AutoPlot
+
+    container = PlotWidgetContainer()
+    plot = AutoPlot(container)
+    _WIDGETS_FOR_TEST.append((container, plot))
+
+    data = DataDict(x=dict(unit='s'), y=dict(axes=['x']))
+    data.validate()
+    data.add_data(x=np.arange(5.0), y=np.arange(5.0))
+    plot.setData(data)
+    assert plot.plot.fig.axes
+
+    plot.setData(None)
+    assert not plot.plot.fig.axes
+
+
+#: 上のテストが作るウィジェットを生かしておく（捨てると Qt ごと消える）
+_WIDGETS_FOR_TEST = []

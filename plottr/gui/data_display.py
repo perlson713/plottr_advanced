@@ -41,11 +41,24 @@ def matchSelection(previous: Sequence[str], available: Sequence[str]) -> List[st
     :param available: what the dataset has now.
     :return: the names to select, in the order they appear in ``available``.
     """
-    if not previous:
+    if not previous or not available:
         return []
 
     bases = {unlabelledName(name) for name in previous}
-    return [name for name in available if unlabelledName(name) in bases]
+    matched = [name for name in available if unlabelledName(name) in bases]
+    if matched:
+        return matched
+
+    # Nothing of what was selected is here any more -- comparing datasets keeps
+    # one quantity, and the one that happened to be selected may not be it.
+    # Show what there is, and show all of it: six datasets were just added to
+    # be compared, so the comparison is what to draw.  An empty plot next to a
+    # full list of fields reads as a failure rather than as a missing click.
+    plottable = [name for name in available if not name.endswith('_err')]
+    if not plottable:
+        return list(available[:1])
+    first = unlabelledName(plottable[0])
+    return [name for name in plottable if unlabelledName(name) == first]
 
 
 class DataSelectionWidget(QtWidgets.QTreeWidget):
