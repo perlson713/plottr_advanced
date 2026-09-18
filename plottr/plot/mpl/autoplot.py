@@ -3,7 +3,8 @@
 
 import logging
 from collections import OrderedDict
-from typing import Dict, List, Tuple, Union, Optional, Any, Type, cast
+from typing import (Dict, List, Sequence, Tuple, Union, Optional, Any,
+                    Type, cast)
 from types import TracebackType
 
 import numpy as np
@@ -37,6 +38,29 @@ FIT_COLOR_AUTO = ''
 #: Axis scales the toolbar offers.
 AXIS_SCALES = (('Linear', 'linear'), ('Log', 'log'))
 
+#: ``legendLocation`` values that are not matplotlib ``loc`` strings.
+LEGEND_AUTO = ''        #: a legend only where one is needed (the old behaviour)
+LEGEND_NONE = 'none'    #: never
+LEGEND_OUTSIDE = 'outside'  #: beside the axes, where it hides no data
+
+#: Where the legend can go.  Everything but the first three is matplotlib's own
+#: ``loc``, spelled the way matplotlib spells it.
+LEGEND_LOCATIONS = (
+    ('Automatic', LEGEND_AUTO),
+    ('Hidden', LEGEND_NONE),
+    ('Outside, right', LEGEND_OUTSIDE),
+    ('Best', 'best'),
+    ('Upper right', 'upper right'),
+    ('Upper left', 'upper left'),
+    ('Lower left', 'lower left'),
+    ('Lower right', 'lower right'),
+    ('Center left', 'center left'),
+    ('Center right', 'center right'),
+    ('Upper center', 'upper center'),
+    ('Lower center', 'lower center'),
+    ('Center', 'center'),
+)
+
 
 def _hasPositiveValues(values: Any) -> bool:
     """Whether a log axis can show this data at all."""
@@ -45,6 +69,69 @@ def _hasPositiveValues(values: Any) -> bool:
         return False
     with np.errstate(invalid='ignore'):
         return bool(np.any(np.isfinite(array) & (array > 0)))
+
+
+def renderableText(text: str) -> str:
+    """``text``, with maths matplotlib cannot parse turned into plain text.
+
+    Labels are worth typing maths into -- `$Q_i$`, `$\\langle n \\rangle$` -- and
+    matplotlib raises while *drawing* a `$...$` it cannot parse, which takes
+    the figure down rather than showing a bad label.  A string it refuses is
+    escaped so the dollars come out as dollars, and the operator sees what is
+    wrong instead of an empty window.
+    """
+    if '$' not in text:
+        return text
+    try:
+        from matplotlib.font_manager import FontProperties
+        from matplotlib import mathtext
+        mathtext.MathTextParser('agg').parse(text, 72, FontProperties())
+    except Exception:  # noqa: BLE001 -- any parse failure means "not maths"
+        return text.replace('$', r'\$')
+    return text
+
+
+class PlotLabels:
+    """What the figure says: title, axis labels, legend.
+
+    Everything here is empty by default, and empty means "whatever the data
+    says" -- the dataset's title, the column labels, a legend only where one
+    is needed.  Typing something replaces that one piece and leaves the rest
+    automatic, so a figure keeps following the data until it is told not to.
+
+    Legend entries are keyed by the label matplotlib would have used, not by
+    the column name: a complex trace drawn as Re and Im is two entries, and
+    both have to be nameable.
+    """
+
+    def __init__(self) -> None:
+        #: figure title; empty takes the one from the dataset
+        self.title: str = ''
+        #: whether to show a title at all
+        self.showTitle: bool = True
+        #: x and y axis labels; empty takes them from the columns
+        self.xLabel: str = ''
+        self.yLabel: str = ''
+        #: where the legend goes; see :data:`LEGEND_LOCATIONS`
+        self.legendLocation: str = LEGEND_AUTO
+        #: automatic legend entry -> what to show instead
+        self.legendNames: Dict[str, str] = {}
+
+    def nameFor(self, label: str) -> str:
+        """What to write in the legend for a trace matplotlib would call this."""
+        return renderableText(self.legendNames.get(label) or label)
+
+    def legendKeywords(self) -> Optional[Dict[str, Any]]:
+        """``Axes.legend`` keywords, or ``None`` for no legend at all."""
+        if self.legendLocation == LEGEND_NONE:
+            return None
+        if self.legendLocation == LEGEND_OUTSIDE:
+            # Beside the axes: with six curves on one plot there is often no
+            # corner left that hides nothing.
+            return dict(loc='upper left', bbox_to_anchor=(1.02, 1.0),
+                        borderaxespad=0.0, fontsize='small')
+        loc = self.legendLocation or 'upper right'
+        return dict(loc=loc, fontsize='small')
 
 
 class PlotStyle:
@@ -113,6 +200,13 @@ class FigureMaker(BaseFM):
         #: point size, line widths and fit color
         self.style = PlotStyle()
 
+        #: title, axis labels and legend
+        self.labels = PlotLabels()
+
+        #: what the axis labels would say if nothing were typed.  Read back by
+        #: the toolbar, to show as the placeholder of the empty fields.
+        self.automaticLabels: Dict[str, str] = {}
+
         #: scale of the x and y axes ('linear' or 'log')
         self.xScale = 'linear'
         self.yScale = 'linear'
@@ -173,17 +267,52 @@ class FigureMaker(BaseFM):
             if len(labels) > 1 and len(set(labels[1])) == 1:
                 axes[0].set_ylabel(labels[1][0])
 
-        if isinstance(axes, list) and len(labels) == 2 and len(set(labels[1])) > 1:
-            axes[0].legend(loc='upper right', fontsize='small')
-
         if isinstance(axes, list) and len(axes) > 1:
             if len(labels) > 2 and len(set(labels[2])) == 1:
                 axes[1].set_ylabel(labels[2][0])
+
+        # What the operator typed wins over what the columns say, one field at
+        # a time: an empty field stays automatic.
+        if isinstance(axes, list) and len(axes) > 0:
+            self.automaticLabels.setdefault('x', axes[0].get_xlabel())
+            self.automaticLabels.setdefault('y', axes[0].get_ylabel())
+            if self.labels.xLabel:
+                axes[0].set_xlabel(renderableText(self.labels.xLabel))
+            if self.labels.yLabel:
+                axes[0].set_ylabel(renderableText(self.labels.yLabel))
+
+        if isinstance(axes, list) and len(axes) > 0:
+            needed = len(labels) == 2 and len(set(labels[1])) > 1
+            self.applyLegend(axes[0], needed)
 
         if isinstance(axes, list):
             for ax in axes:
                 self.applyAxisScales(subPlotId, ax)
         return None
+
+    def applyLegend(self, ax: Axes, needed: bool) -> None:
+        """Draw the legend the way the toolbar asks for it.
+
+        ``needed`` is the old rule: a legend where several traces share the
+        panel, and none where the y label already says what the single trace
+        is.  That is what ``Automatic`` keeps doing; any other choice is the
+        operator's and is followed whether or not the legend is needed.
+
+        Entries are renamed here rather than at the point of drawing, because
+        the name to rename is the one matplotlib ended up with -- a complex
+        trace split into Re and Im is two entries.
+        """
+        keywords = self.labels.legendKeywords()
+        if keywords is None:
+            return
+        if not needed and self.labels.legendLocation == LEGEND_AUTO:
+            return
+
+        handles, autoLabels = ax.get_legend_handles_labels()
+        if not handles:
+            return
+        ax.legend(handles, [self.labels.nameFor(name) for name in autoLabels],
+                  **keywords)
 
     def applyAxisScales(self, subPlotId: int, ax: Axes) -> None:
         """Put the chosen scales on one set of axes.
@@ -386,6 +515,151 @@ class PlotStyleWidget(QtWidgets.QWidget):
         self.changed.emit()
 
 
+class PlotLabelsWidget(QtWidgets.QWidget):
+    """Form for the title, the axis labels and the legend.
+
+    It edits a :class:`PlotLabels` in place and says so with :attr:`changed`;
+    the plot widget redraws on that.  Every field is "empty means automatic",
+    and each shows the automatic value as its placeholder, so it is clear what
+    is being replaced before anything is typed.
+    """
+
+    #: emitted after any of the values changed
+    changed = Signal()
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self._labels: Optional[PlotLabels] = None
+        self._filling = False
+
+        self.title = QtWidgets.QLineEdit()
+        self.title.setToolTip(
+            'Title above the figure.  Empty keeps the one the dataset carries '
+            '(the file it was loaded from).')
+        self.showTitle = QtWidgets.QCheckBox('Show')
+        self.showTitle.setToolTip(
+            'The automatic title is the full path of the file, which is more '
+            'than a figure for a talk wants.')
+
+        self.xLabel = QtWidgets.QLineEdit()
+        self.xLabel.setToolTip('Empty takes the label from the column.')
+        self.yLabel = QtWidgets.QLineEdit()
+        self.yLabel.setToolTip('Empty takes the label from the column.')
+
+        self.legendLocation = QtWidgets.QComboBox()
+        for name, value in LEGEND_LOCATIONS:
+            self.legendLocation.addItem(name, value)
+        self.legendLocation.setToolTip(
+            '`Automatic` puts a legend where there is more than one trace and '
+            'leaves it off otherwise.  `Outside, right` hides no data, which '
+            'is what six curves on one plot usually need.')
+
+        self.entries = QtWidgets.QTableWidget(0, 2)
+        self.entries.setHorizontalHeaderLabels(['Trace', 'Show as'])
+        self.entries.verticalHeader().setVisible(False)
+        self.entries.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.entries.setToolTip(
+            'What each trace is called in the legend.  Leave a cell empty to '
+            'keep the name the column gives it.')
+        self.entries.setMinimumWidth(320)
+        self.entries.setMaximumHeight(200)
+        header = self.entries.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+
+        titleRow = QtWidgets.QHBoxLayout()
+        titleRow.addWidget(self.title)
+        titleRow.addWidget(self.showTitle)
+
+        form = QtWidgets.QFormLayout(self)
+        form.addRow('Title', titleRow)
+        form.addRow('X label', self.xLabel)
+        form.addRow('Y label', self.yLabel)
+        form.addRow('Legend', self.legendLocation)
+        form.addRow('Entries', self.entries)
+
+        # editingFinished, not textChanged: the figure should not be redrawn
+        # once per keystroke.
+        for edit in (self.title, self.xLabel, self.yLabel):
+            edit.editingFinished.connect(self._apply)
+        self.showTitle.toggled.connect(self._apply)
+        self.legendLocation.currentIndexChanged.connect(self._apply)
+        self.entries.itemChanged.connect(self._entryChanged)
+
+    def setLabels(self, labels: 'PlotLabels') -> None:
+        """Show the values of ``labels``, and edit that object from now on."""
+        self._labels = None  # do not write back while filling the form in
+        self.title.setText(labels.title)
+        self.showTitle.setChecked(labels.showTitle)
+        self.xLabel.setText(labels.xLabel)
+        self.yLabel.setText(labels.yLabel)
+        index = self.legendLocation.findData(labels.legendLocation)
+        if index >= 0:
+            self.legendLocation.setCurrentIndex(index)
+        self._labels = labels
+
+    def setAutomatic(self, title: str = '', xLabel: str = '',
+                     yLabel: str = '') -> None:
+        """Show what each field would say if it were left empty."""
+        self.title.setPlaceholderText(title)
+        self.xLabel.setPlaceholderText(xLabel)
+        self.yLabel.setPlaceholderText(yLabel)
+
+    def setEntries(self, entries: Sequence[str]) -> None:
+        """List the traces that are currently in the plot.
+
+        Called after every redraw, so it must not look like the operator typed
+        something: the table is rebuilt with signals held.
+        """
+        current = [self.entries.item(row, 0).text()
+                   for row in range(self.entries.rowCount())
+                   if self.entries.item(row, 0) is not None]
+        if list(entries) == current:
+            return
+
+        self._filling = True
+        try:
+            self.entries.setRowCount(len(entries))
+            for row, name in enumerate(entries):
+                first = QtWidgets.QTableWidgetItem(name)
+                first.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                self.entries.setItem(row, 0, first)
+                shown = ''
+                if self._labels is not None:
+                    shown = self._labels.legendNames.get(name, '')
+                self.entries.setItem(row, 1, QtWidgets.QTableWidgetItem(shown))
+        finally:
+            self._filling = False
+
+    @Slot(QtWidgets.QTableWidgetItem)
+    def _entryChanged(self, item: QtWidgets.QTableWidgetItem) -> None:
+        if self._filling or self._labels is None or item.column() != 1:
+            return
+        key = self.entries.item(item.row(), 0)
+        if key is None:
+            return
+        text = item.text().strip()
+        if text:
+            self._labels.legendNames[key.text()] = text
+        else:
+            self._labels.legendNames.pop(key.text(), None)
+        self.changed.emit()
+
+    @Slot()
+    def _apply(self) -> None:
+        if self._labels is None:
+            return
+        self._labels.title = self.title.text()
+        self._labels.showTitle = self.showTitle.isChecked()
+        self._labels.xLabel = self.xLabel.text()
+        self._labels.yLabel = self.yLabel.text()
+        self._labels.legendLocation = str(self.legendLocation.currentData())
+        self.changed.emit()
+
+
 # A toolbar for setting options on the MPL autoplot
 class AutoPlotToolBar(QtWidgets.QToolBar):
     """
@@ -412,6 +686,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
     #: signal emitted when an axis scale has been changed (x scale, y scale)
     axisScaleSelected = Signal(str, str)
+
+    #: signal emitted when the title, an axis label or the legend changed
+    plotLabelsChanged = Signal()
 
     def __init__(self, name: str, parent: Optional[QtWidgets.QWidget] = None):
         """Constructor for :class:`AutoPlotToolBar`"""
@@ -450,45 +727,54 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.plotasScatter2d.triggered.connect(
             lambda: self.selectPlotType(PlotType.scatter2d))
 
-        # other options
+        # How complex data is shown.  Behind one button rather than as seven
+        # more entries in the row: they are mutually exclusive, so the button's
+        # own text can say which one is on, and the row was wide enough to push
+        # everything after it off the screen on a laptop.
         self.addSeparator()
 
-        self.plotReal = self.addAction('Real')
-        self.plotReal.setCheckable(True)
-        self.plotReal.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.real))
+        self.complexMenu = QtWidgets.QMenu(parent=self)
+        self.complexGroup = QtGui.QActionGroup(self)
+        self.complexGroup.setExclusive(True)
 
-        self.plotReIm = self.addAction('Re/Im')
-        self.plotReIm.setCheckable(True)
-        self.plotReIm.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.realAndImag))
+        def complexAction(text: str, representation: ComplexRepresentation,
+                          tip: str = '') -> Any:
+            action = self.complexMenu.addAction(text)
+            action.setCheckable(True)
+            if tip:
+                action.setToolTip(tip)
+            action.setData(text)
+            self.complexGroup.addAction(action)
+            action.triggered.connect(
+                lambda: self.selectComplexType(representation))
+            return action
 
-        self.plotReImSep = self.addAction('Split Re/Im')
-        self.plotReImSep.setCheckable(True)
-        self.plotReImSep.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.realAndImagSeparate))
+        self.plotReal = complexAction(
+            'Real', ComplexRepresentation.real, 'The real part alone.')
+        self.plotReIm = complexAction(
+            'Re/Im', ComplexRepresentation.realAndImag,
+            'Real and imaginary parts in one panel.')
+        self.plotReImSep = complexAction(
+            'Split Re/Im', ComplexRepresentation.realAndImagSeparate,
+            'Real and imaginary parts in a panel each.')
+        self.plotMag = complexAction(
+            'Mag', ComplexRepresentation.mag, 'Magnitude only, in one panel.')
+        self.plotPhase = complexAction(
+            'Phase', ComplexRepresentation.phase, 'Phase only, in one panel.')
+        self.plotMagPhase = complexAction(
+            'Mag/Phase', ComplexRepresentation.magAndPhase,
+            'Magnitude and phase in a panel each.')
+        self.plotComplexPlane = complexAction(
+            'Complex plane', ComplexRepresentation.complexPlane,
+            'The trace in the complex plane (the resonance circle).')
 
-        self.plotMag = self.addAction('Mag')
-        self.plotMag.setCheckable(True)
-        self.plotMag.setToolTip('Magnitude only, in one panel.')
-        self.plotMag.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.mag))
-
-        self.plotPhase = self.addAction('Phase')
-        self.plotPhase.setCheckable(True)
-        self.plotPhase.setToolTip('Phase only, in one panel.')
-        self.plotPhase.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.phase))
-
-        self.plotMagPhase = self.addAction('Mag/Phase')
-        self.plotMagPhase.setCheckable(True)
-        self.plotMagPhase.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.magAndPhase))
-
-        self.plotComplexPlane = self.addAction('Complex plane')
-        self.plotComplexPlane.setCheckable(True)
-        self.plotComplexPlane.triggered.connect(
-            lambda: self.selectComplexType(ComplexRepresentation.complexPlane))
+        self.complexButton = QtWidgets.QToolButton()
+        self.complexButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.complexButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.complexButton.setMenu(self.complexMenu)
+        self.complexButton.setToolTip('How complex data is shown.')
+        self.addWidget(self.complexButton)
+        self.complexButtonAction = self.actions()[-1]
 
         self.addSeparator()
 
@@ -527,6 +813,25 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.styleButton.setMenu(styleMenu)
         self.addWidget(self.styleButton)
         self._styleMenu = styleMenu
+
+        # Title, axis labels and legend.  Same reasoning as the style button:
+        # set once per figure, then left alone.
+        self.labelsWidget = PlotLabelsWidget(self)
+        self.labelsWidget.changed.connect(self.plotLabelsChanged)
+        labelsMenu = QtWidgets.QMenu(parent=self)
+        labelsAction = QtWidgets.QWidgetAction(labelsMenu)
+        labelsAction.setDefaultWidget(self.labelsWidget)
+        labelsMenu.addAction(labelsAction)
+        self.labelsButton = QtWidgets.QToolButton()
+        self.labelsButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.labelsButton.setText('Labels')
+        self.labelsButton.setToolTip(
+            'Title, axis labels, and where the legend goes and what it calls '
+            'each trace.')
+        self.labelsButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.labelsButton.setMenu(labelsMenu)
+        self.addWidget(self.labelsButton)
+        self._labelsMenu = labelsMenu
 
         # Linear or logarithmic axes.  Qi against the photon number is read on
         # a log x axis; so is anything spanning decades.
@@ -582,6 +887,17 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self._currentComplex = ComplexRepresentation.realAndImag
         self.ComplexActions[self._currentComplex].setChecked(True)
         self._currentlyAllowedComplexTypes: Tuple[ComplexRepresentation, ...] = ()
+        self._showComplexChoice()
+
+    def _showComplexChoice(self) -> None:
+        """Write the current representation on the button.
+
+        The row no longer shows seven buttons with one highlighted, so the
+        button has to say which one is on.
+        """
+        action = self.ComplexActions.get(self._currentComplex)
+        name = str(action.data()) if action is not None else ''
+        self.complexButton.setText(f'Complex: {name}' if name else 'Complex')
 
     @Slot()
     def _emitAxisScales(self) -> None:
@@ -600,6 +916,19 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
     def setPlotStyle(self, style: 'PlotStyle') -> None:
         """Hand the style object the toolbar edits in place."""
         self.styleWidget.setStyle(style)
+
+    def setPlotLabels(self, labels: 'PlotLabels') -> None:
+        """Hand the labels object the toolbar edits in place."""
+        self.labelsWidget.setLabels(labels)
+
+    def setLegendEntries(self, entries: Sequence[str]) -> None:
+        """List the traces that are in the plot now, so they can be renamed."""
+        self.labelsWidget.setEntries(entries)
+
+    def setAutomaticLabels(self, title: str = '', xLabel: str = '',
+                           yLabel: str = '') -> None:
+        """Show what the empty fields would say."""
+        self.labelsWidget.setAutomatic(title, xLabel, yLabel)
 
     def setErrorBarOptions(
         self, data: Optional[DataDictBase], sources: Optional[Dict[str, str]] = None
@@ -720,6 +1049,7 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
         # don't want un-toggling - can only be done by selecting another type
         self.ComplexActions[comp].setChecked(True)
+        self._showComplexChoice()
 
         if comp is not self._currentComplex:
             self._currentComplex = comp
@@ -751,6 +1081,9 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
 
             self.complexRepresentationSelected.emit(self._currentComplex)
 
+        # Only one choice (the data is real): the button says nothing useful.
+        self.complexButtonAction.setVisible(len(complexOptions) > 1)
+        self._showComplexChoice()
         self._currentlyAllowedComplexTypes = complexOptions
 
 
@@ -776,6 +1109,8 @@ class AutoPlot(MPLPlotWidget):
         self.errorBarSources: Dict[str, str] = {}
         #: point size, line widths and fit color; the toolbar edits this
         self.plotStyle = PlotStyle()
+        #: title, axis labels and legend; the toolbar edits this
+        self.plotLabels = PlotLabels()
         #: scale of the x and y axes ('linear' or 'log')
         self.xScale = 'linear'
         self.yScale = 'linear'
@@ -801,6 +1136,10 @@ class AutoPlot(MPLPlotWidget):
             self._plotStyleFromToolBar
         )
         self.plotOptionsToolBar.setPlotStyle(self.plotStyle)
+        self.plotOptionsToolBar.plotLabelsChanged.connect(
+            self._plotLabelsFromToolBar
+        )
+        self.plotOptionsToolBar.setPlotLabels(self.plotLabels)
         self.plotOptionsToolBar.axisScaleSelected.connect(
             self._axisScalesFromToolBar
         )
@@ -906,6 +1245,11 @@ class AutoPlot(MPLPlotWidget):
         """Redraw with the point size / line widths / fit color from the toolbar."""
         self._plotData()
 
+    @Slot()
+    def _plotLabelsFromToolBar(self) -> None:
+        """Redraw with the title / axis labels / legend from the toolbar."""
+        self._plotData()
+
     @Slot(str, str)
     def _errorBarSourceFromToolBar(self, dependent: str, source: str) -> None:
         if self.errorBarSources.get(dependent, ERROR_BAR_AUTO) != source:
@@ -947,6 +1291,7 @@ class AutoPlot(MPLPlotWidget):
         with FigureMaker(self.plot.fig) as fm:
             fm.plotType = self.plotType
             fm.style = self.plotStyle
+            fm.labels = self.plotLabels
             fm.xScale, fm.yScale = self.xScale, self.yScale
             if not self.dataIsComplex():
                 fm.complexRepresentation = ComplexRepresentation.real
@@ -974,4 +1319,40 @@ class AutoPlot(MPLPlotWidget):
                     **kw)
 
         self.setMeta(self.data)
+        self._applyTitle()
+        self._reportPlotLabels(fm.automaticLabels)
         self.updatePlot()
+
+    def _applyTitle(self) -> None:
+        """Put the operator's title on the figure, or take it off.
+
+        ``setMeta`` has just written the dataset's own title (the path of the
+        file), which is what the empty field means.
+        """
+        if not self.plotLabels.showTitle:
+            self.plot.setFigureTitle('')
+        elif self.plotLabels.title:
+            self.plot.setFigureTitle(renderableText(self.plotLabels.title))
+
+    def _automaticTitle(self) -> str:
+        if self.data is not None and self.data.has_meta('title'):
+            return str(self.data.meta_val('title'))
+        return ''
+
+    def _reportPlotLabels(self, automatic: Optional[Dict[str, str]] = None) \
+            -> None:
+        """Tell the toolbar what the figure ended up with.
+
+        The legend entries can only be known after the figure is drawn (a
+        complex trace shown as Re and Im is two of them), and the axis labels
+        are what the empty fields stand for.
+        """
+        automatic = automatic or {}
+        axes = self.plot.fig.axes
+        entries: List[str] = []
+        if axes:
+            _, entries = axes[0].get_legend_handles_labels()
+        self.plotOptionsToolBar.setAutomaticLabels(
+            self._automaticTitle(),
+            automatic.get('x', ''), automatic.get('y', ''))
+        self.plotOptionsToolBar.setLegendEntries(entries)
