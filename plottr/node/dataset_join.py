@@ -5,18 +5,24 @@ from one chip, the same device in two cooldowns -- means one plot with one
 curve per dataset.  plottr shows one dataset at a time, so this node loads
 further ddh5 files and merges them into the one being viewed.
 
-How the merge works: every dataset keeps its own rows.  The added dataset's
-dependents become ``<name> [<label>]`` and the rows of the others are filled
-with NaN, so a point that was never measured is a gap rather than an invented
-value.  Nothing is interpolated or resampled.  The axis is shared by name, so
-the curves land on one pair of axes and the legend tells them apart.
+The comparison this exists for is `Qi` against the photon number, and the
+photon number is a *dependent* of the power, not an axis: it has exactly one
+value per measured power.  So the node builds the x axis itself.  When it
+reads a dataset it takes the compared column (`Qi`) together with that
+dataset's `photon` column -- the same number of points, point for point -- and
+writes a new column whose x values are the photon numbers instead of the
+powers.  Every dataset is put through this, the one already open included, so
+they all end up on one x axis and one plot.  `X axis` says which column to use;
+emptying it keeps the power (or whatever the dataset's own axis is).
 
-The node sits *after* ``Photon axis``, which means the plot's x axis may be
-something that node built (``log10_photon``).  A file loaded here is put in the
-same shape, by name: an axis called ``log10_<dep>`` means "swap ``<dep>`` in
-and take log10 of it".  That is why the transformation lives in
-:func:`.dependent_axis.swapDependentToAxis` -- one implementation, used from
-both places.
+Nothing is interpolated or resampled.  Every dataset keeps its own rows: the
+added dataset's dependents become ``<name> [<label>]`` and the rows of the
+others are NaN, so a point that was never measured is a gap rather than an
+invented value.
+
+Because the x axis is built here, the ``Photon axis`` node upstream is not
+needed for this plot -- and if it is switched on anyway, its axis is recognised
+by name (``photon``, or ``log10_photon``) and used, so the two do not fight.
 
 Only the columns being compared are brought over.  A power sweep saves some
 thirty of them, and joining three datasets whole turns the `Data selection`
@@ -48,7 +54,8 @@ from ..data.datadict_storage import datadict_from_hdf5
 from .dependent_axis import swapDependentToAxis
 from .node import Node, NodeWidget, updateOption
 
-__all__ = ['DEFAULT_COLUMNS', 'JoinDatasets', 'JoinDatasetsWidget',
+__all__ = ['DEFAULT_ABSCISSA', 'DEFAULT_COLUMNS', 'JoinDatasets',
+           'JoinDatasetsWidget', 'abscissaValues',
            'datasetLabel', 'datasetStamp', 'joinAxes', 'joinDatasets',
            'loadDataset',
            'parseColumns', 'seriesName', 'uniqueLabels', 'wantedColumns']
@@ -60,6 +67,12 @@ GROUPNAME = 'data'
 #: quantity at a time, and for a power sweep that is the internal quality
 #: factor; everything else would only lengthen the selection list.
 DEFAULT_COLUMNS = 'Qi'
+
+#: Column used as the x axis unless told otherwise.  `Qi` against the photon
+#: number is what these comparisons are; the photon number is a dependent of
+#: the power with one value per power, so it can stand in for it point for
+#: point.  Emptying the field keeps the dataset's own axis.
+DEFAULT_ABSCISSA = 'photon'
 
 #: An axis that a dependent was turned into by ``Photon axis``.
 _LOG_AXIS = re.compile(r'^log10_(?P<name>.+)$')
@@ -226,10 +239,61 @@ def _rowsOn(data: DataDictBase, axes: Sequence[str]) -> np.ndarray:
     return np.sort(index)
 
 
+def abscissaValues(data: DataDictBase, axes: Sequence[str], wanted: str) \
+        -> Tuple[Optional[np.ndarray], str]:
+    """The x values ``wanted`` gives this dataset, one per row.
+
+    The photon number has one value per measured power -- the same points as
+    `Qi`, point for point -- so it can stand in for the power as the x column.
+    That is all this does: read the column and hand back its values.
+
+    It is also accepted as an axis, because the ``Photon axis`` node upstream
+    may already have made it one; ``log10_photon`` means that node was asked
+    for the logarithm, and then the same is done here so the datasets agree.
+
+    :return: the values, or ``None`` and why not.
+    """
+    if not wanted:
+        return None, ''
+
+    match = _LOG_AXIS.match(wanted)
+    base = match.group('name') if match else wanted
+
+    known = list(data.axes()) + list(data.dependents())
+    if wanted in known:            # already in the shape asked for
+        source, takeLog = wanted, False
+    elif base in known:            # the plain column; take log10 if asked
+        source, takeLog = base, match is not None
+    else:
+        return None, f'no `{base}` column'
+
+    if source in data.dependents() and set(data.axes(source)) != set(axes):
+        return None, (f'`{source}` is on {", ".join(data.axes(source))}, '
+                      f'not on {", ".join(axes)}')
+
+    values = np.asarray(data.data_vals(source), dtype=float).flatten()
+    if not np.any(np.isfinite(values)):
+        # The usual cause: `line_attenuation_db` was never set, so the
+        # measurement wrote `photon` as NaN for every power.
+        return None, f'`{source}` is NaN everywhere'
+
+    if takeLog:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            values = np.log10(values)
+    return values, ''
+
+
+def _axisInfo(data: DataDictBase, name: str) -> Tuple[str, str]:
+    """``(unit, label)`` of a column, empty where the dataset says nothing."""
+    entry = data.get(name, {}) or {}
+    return entry.get('unit', ''), entry.get('label', '')
+
+
 def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
-                 columns: Sequence[str] = ()) \
+                 columns: Sequence[str] = (),
+                 abscissa: str = '') \
         -> Tuple[Optional[DataDictBase], str]:
-    """Merge datasets that share their axes into one.
+    """Merge datasets into one, on a shared x axis.
 
     :param parts: ``(label, dataset)`` pairs.  A label of ``''`` leaves that
         dataset's names alone -- used for the dataset already being viewed when
@@ -238,6 +302,10 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
         dataset, the one being viewed included: the joined dataset is the
         comparison, and a comparison of one quantity has no use for the other
         twenty-nine.
+    :param abscissa: column to use as the x axis, ``photon`` for the plot this
+        is for.  Each dataset's own values are taken, so the curves share an
+        axis without anything being interpolated.  Empty, or not available in
+        every dataset, falls back to the axis the datasets already share.
     :return: the merged dataset and a one-line summary.
     """
     parts = [(label, _expanded(data)) for label, data in parts
@@ -247,40 +315,72 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
     if len(parts) == 1:
         return parts[0][1], ''
 
-    axes = joinAxes(parts[0][1], columns)
-    for label, data in parts[1:]:
-        # The order does not have to match: a ddh5 read back can list the axes
-        # the other way round, and each dataset's own columns stay aligned with
-        # each other whatever the order is.
-        if not set(axes) <= set(data.axes()):
-            return None, (f'`{label}` has axes {", ".join(data.axes())}, '
-                          f'not {", ".join(axes)}')
+    notes: List[str] = []
 
-    # One row per point of those axes, per dataset.  Every dataset keeps its
-    # own rows; the others are NaN there.
-    rows = [_rowsOn(data, axes) for _, data in parts]
+    # Each dataset's own rows: the points of the axes its compared columns live
+    # on.  This is what the x column has to line up with, and what gets
+    # concatenated.
+    ownAxes = [joinAxes(data, columns) for _, data in parts]
+    rows = [_rowsOn(data, axes) for (_, data), axes in zip(parts, ownAxes)]
+
+    # The x column.  Built out of a dependent (`photon`) where every dataset
+    # has one; otherwise the axis the datasets already share.
+    xColumns: List[Tuple[str, str, str, List[np.ndarray]]] = []
+    if abscissa:
+        chunks: List[np.ndarray] = []
+        for number, ((label, data), axes) in enumerate(zip(parts, ownAxes)):
+            values, why = abscissaValues(data, axes, abscissa)
+            if values is None:
+                notes.append(f'{label}: {why}')
+                chunks = []
+                break
+            picked = values[rows[number]]
+            # Points in x order, so the line does not double back when the
+            # dataset was measured from the top power down.
+            order = np.argsort(picked, kind='stable')
+            rows[number] = rows[number][order]
+            chunks.append(picked[order])
+        if chunks:
+            unit, label = _axisInfo(parts[0][1], abscissa)
+            xColumns.append((abscissa, unit, label, chunks))
+
+    if not xColumns:
+        if abscissa:
+            notes.append(f'falling back to {", ".join(ownAxes[0])}')
+        axes = ownAxes[0]
+        for (label, data), _ in zip(parts[1:], ownAxes[1:]):
+            # The order does not have to match: a ddh5 read back can list the
+            # axes the other way round, and each dataset's own columns stay
+            # aligned with each other whatever the order is.
+            if not set(axes) <= set(data.axes()):
+                return None, (f'`{label}` has axes {", ".join(data.axes())}, '
+                              f'not {", ".join(axes)}')
+        rows = [_rowsOn(data, axes) for _, data in parts]
+        ownAxes = [list(axes) for _ in parts]
+        for name in axes:
+            unit, label = _axisInfo(parts[0][1], name)
+            xColumns.append((name, unit, label, [
+                np.asarray(data.data_vals(name)).flatten()[index]
+                for (_, data), index in zip(parts, rows)]))
+
+    axisNames = [name for name, _, _, _ in xColumns]
     lengths = [int(index.size) for index in rows]
     total = int(sum(lengths))
     offsets = np.cumsum([0] + lengths)
 
     out = DataDict()
-    first = parts[0][1]
-    for axis in axes:
-        values = np.concatenate([
-            np.asarray(data.data_vals(axis)).flatten()[index]
-            for (_, data), index in zip(parts, rows)])
-        out[axis] = dict(values=values, axes=[],
-                         unit=first.get(axis, {}).get('unit', ''),
-                         label=first.get(axis, {}).get('label', ''))
+    for name, unit, label, chunks in xColumns:
+        out[name] = dict(values=np.concatenate(chunks), axes=[],
+                         unit=unit, label=label)
 
     dropped: List[str] = []
     for number, ((label, data), index) in enumerate(zip(parts, rows)):
         start, stop = int(offsets[number]), int(offsets[number + 1])
-        rowCount = np.asarray(
-            data.data_vals(list(data.axes())[0])).size
+        rowCount = np.asarray(data.data_vals(list(data.axes())[0])).size
         for dependent in wantedColumns(data, columns):
             values = np.asarray(data.data_vals(dependent)).flatten()
-            onOtherAxes = columns and set(data.axes(dependent)) != set(axes)
+            onOtherAxes = (columns
+                           and set(data.axes(dependent)) != set(ownAxes[number]))
             if onOtherAxes or values.size != rowCount:
                 # A trace, when quality factors are being compared; or a column
                 # that does not line up with the dataset's rows at all.
@@ -291,7 +391,7 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
             column = np.full(total, np.nan, dtype=_joinDtype(values))
             column[start:stop] = values
             out[seriesName(dependent, label)] = dict(
-                values=column, axes=list(axes),
+                values=column, axes=list(axisNames),
                 unit=data.get(dependent, {}).get('unit', ''),
                 label=data.get(dependent, {}).get('label', ''),
             )
@@ -304,15 +404,17 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
                       + ', '.join(f'`{name}`' for name in columns))
 
     out.validate()
-    summary = (f'{len(parts)} datasets joined: '
+    summary = (f'{len(parts)} datasets joined on `{", ".join(axisNames)}`: '
                + ', '.join(f'{label or "this one"} ({n} points)'
                            for (label, _), n in zip(parts, lengths)))
     if columns:
         summary += '; columns: ' + ', '.join(sorted(
             {name.rsplit(' [', 1)[0] for name in out.dependents()}))
     if dropped:
-        summary += ('; not on ' + ', '.join(axes) + ': '
+        summary += ('; not on ' + ', '.join(axisNames) + ': '
                     + ', '.join(sorted(dropped)))
+    if notes:
+        summary += '; ' + '; '.join(notes)
     return out, summary
 
 
@@ -363,6 +465,9 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
     #: emitted with the new column list whenever it changes
     columnsChanged = Signal(str)
 
+    #: emitted with the new x axis column whenever it changes
+    abscissaChanged = Signal(str)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
 
@@ -385,6 +490,15 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
             'every dataset, including the one already open.  Error bars follow '
             'their column.  Leave it empty to bring everything.')
 
+        self.abscissa = QtWidgets.QLineEdit(DEFAULT_ABSCISSA)
+        self.abscissa.setToolTip(
+            'Column put on the x axis.  The photon number is saved with one '
+            'value per measured power -- the same points as Qi -- so each '
+            'dataset\'s own photon numbers replace its powers when it is read, '
+            'and the curves land on one axis without anything being '
+            'interpolated.  Leave it empty to keep the power (or whatever the '
+            'dataset\'s own axis is).')
+
         buttons = QtWidgets.QHBoxLayout()
         buttons.addWidget(self.addButton)
         buttons.addWidget(self.removeButton)
@@ -394,10 +508,15 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
         columnRow.addWidget(QtWidgets.QLabel('Compare'))
         columnRow.addWidget(self.columns)
 
+        abscissaRow = QtWidgets.QHBoxLayout()
+        abscissaRow.addWidget(QtWidgets.QLabel('X axis'))
+        abscissaRow.addWidget(self.abscissa)
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.list)
         layout.addLayout(buttons)
         layout.addLayout(columnRow)
+        layout.addLayout(abscissaRow)
         layout.addWidget(self.status)
 
         self.addButton.clicked.connect(self._add)
@@ -406,6 +525,8 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
         # name is half typed.
         self.columns.editingFinished.connect(
             lambda: self.columnsChanged.emit(self.columns.text()))
+        self.abscissa.editingFinished.connect(
+            lambda: self.abscissaChanged.emit(self.abscissa.text()))
 
     def files(self) -> List[str]:
         return [self.list.item(i).data(0x0100)  # Qt.UserRole
@@ -446,12 +567,16 @@ class JoinDatasetsWidget(NodeWidget):
         assert self.widget is not None
 
         self.optSetters = {'files': self.widget.setFiles,
-                           'columns': self.widget.columns.setText}
+                           'columns': self.widget.columns.setText,
+                           'abscissa': self.widget.abscissa.setText}
         self.optGetters = {'files': self.widget.files,
-                           'columns': self.widget.columns.text}
+                           'columns': self.widget.columns.text,
+                           'abscissa': self.widget.abscissa.text}
 
         self.widget.filesChanged.connect(lambda: self.signalOption('files'))
         self.widget.columnsChanged.connect(lambda: self.signalOption('columns'))
+        self.widget.abscissaChanged.connect(
+            lambda: self.signalOption('abscissa'))
 
         if node is not None:
             node.statusChanged.connect(self.widget.status.setText)
@@ -467,6 +592,9 @@ class JoinDatasets(Node):
         - ``files``: paths of the ddh5 files to draw as well.
         - ``columns``: which dependents to compare, comma separated.  Empty
           brings every column of every dataset.
+        - ``abscissa``: column put on the x axis (``photon``).  Every dataset
+          contributes its own values, so nothing is interpolated.  Empty keeps
+          the datasets' own axis.
     """
 
     nodeName = 'JoinDatasets'
@@ -479,6 +607,7 @@ class JoinDatasets(Node):
     def __init__(self, name: str) -> None:
         self._files: List[str] = []
         self._columns: str = DEFAULT_COLUMNS
+        self._abscissa: str = DEFAULT_ABSCISSA
         super().__init__(name)
 
     @property
@@ -498,6 +627,15 @@ class JoinDatasets(Node):
     @updateOption('columns')
     def columns(self, value: str) -> None:
         self._columns = str('' if value is None else value)
+
+    @property
+    def abscissa(self) -> str:
+        return self._abscissa
+
+    @abscissa.setter
+    @updateOption('abscissa')
+    def abscissa(self, value: str) -> None:
+        self._abscissa = str('' if value is None else value).strip()
 
     def process(self, dataIn: Optional[DataDictBase] = None) \
             -> Optional[Dict[str, Optional[DataDictBase]]]:
@@ -522,6 +660,11 @@ class JoinDatasets(Node):
             except Exception as exc:  # noqa: BLE001 -- never take the viewer down
                 notes.append(f'{Path(path).name}: {type(exc).__name__}: {exc}')
                 continue
+            if self._abscissa:
+                # The x axis is built in `joinDatasets`, out of each dataset's
+                # own column, so nothing has to match beforehand.
+                parts.append((label, extra))
+                continue
             shaped, why = reshapeLike(extra, axes)
             if shaped is None:
                 notes.append(f'{label}: {why}')
@@ -533,7 +676,8 @@ class JoinDatasets(Node):
             return dict(dataOut=dataIn)
 
         try:
-            joined, summary = joinDatasets(parts, parseColumns(self._columns))
+            joined, summary = joinDatasets(parts, parseColumns(self._columns),
+                                           self._abscissa)
         except Exception as exc:  # noqa: BLE001 -- never take the viewer down
             self.statusChanged.emit(f'{type(exc).__name__}: {exc}')
             return dict(dataOut=dataIn)

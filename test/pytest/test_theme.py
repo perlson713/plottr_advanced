@@ -6,7 +6,9 @@ is called from every entry point and from tests that have no window.
 """
 
 from plottr import QtWidgets
-from plottr.gui.theme import ACCENT, applyTheme, palette, styleSheet
+from plottr.gui.theme import (ACCENT, BASE_FONT_PX, applyTheme,
+                              fontSizeForWindow, palette, styleSheet,
+                              windowBlock)
 
 
 def test_stylesheet_is_valid_qss_ish():
@@ -17,7 +19,7 @@ def test_stylesheet_is_valid_qss_ish():
 
 def test_scaling_changes_the_font_size():
     assert styleSheet(1.0) != styleSheet(2.0)
-    assert 'font-size: 20px' in styleSheet(2.0)
+    assert f'font-size: {2 * BASE_FONT_PX}px' in styleSheet(2.0)
 
 
 def test_apply_sets_palette_and_stylesheet(qtbot):
@@ -98,3 +100,28 @@ def test_the_window_font_follows_a_resize(qtbot):
 
     # 子ウィジェットまで届いていること（届かない実装を 1 度踏んでいる）
     assert largeText > smallText
+
+
+def test_the_font_follows_the_window_visibly():
+    """文字がウィンドウに追いつくこと。
+
+    最初の版は 1280x800 で 10px、1920x1080 に広げても 12px で、「変わって
+    いない」としか見えなかった（実際にそう報告された）。段差が読み取れる
+    ことを条件にする。
+    """
+    small = fontSizeForWindow(1280, 800)
+    large = fontSizeForWindow(1920, 1080)
+    assert small == BASE_FONT_PX
+    assert large >= small + 3
+    # 小さくしても読める大きさから下がらない
+    assert fontSizeForWindow(800, 500) >= 10
+    # 壁のディスプレイでポスターにならない
+    assert fontSizeForWindow(5120, 2880) <= 3 * BASE_FONT_PX
+
+
+def test_the_window_block_scales_the_spacing_too():
+    """字だけ大きくして余白が 3px のままだと、変わっていないように見える。"""
+    small, large = windowBlock(11), windowBlock(21)
+    assert 'font-size: 11px' in small and 'font-size: 21px' in large
+    assert 'QPushButton' in large
+    assert small != large

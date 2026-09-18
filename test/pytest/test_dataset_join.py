@@ -132,8 +132,10 @@ def test_node_joins_a_file_from_disk(qtbot, tmp_path):
 
     assert 'Qi [CD32_r2]' in out.dependents()
     assert any('2 datasets joined' in m for m in messages)
-    power = np.asarray(out.data_vals('power'), dtype=float)
-    assert power.size == len(POWERS_A) + len(POWERS_B)
+    # 既定では横軸は光子数（下の「取り込んだ時点で書き換える」を参照）
+    assert out.axes() == ['photon']
+    photon = np.asarray(out.data_vals('photon'), dtype=float)
+    assert photon.size == len(POWERS_A) + len(POWERS_B)
 
 
 def test_a_broken_file_says_so_and_keeps_the_plot(qtbot, tmp_path):
@@ -359,7 +361,7 @@ def test_many_datasets_join(qtbot, tmp_path):
 
     curves = [name for name in out.dependents() if not name.endswith('_err')]
     assert len(curves) == 7
-    assert np.asarray(out.data_vals('power')).size == \
+    assert np.asarray(out.data_vals('photon')).size == \
         len(POWERS_A) + 6 * len(POWERS_B)
 
 
@@ -429,3 +431,132 @@ def test_columns_on_other_axes_are_reported():
     assert joined.axes() == ['power']
     assert 's11_raw' in summary          # 黙って落とさない
     assert not any('s11_raw' in name for name in joined.dependents())
+
+
+# ---------------------------------------------------------------------------
+# 取り込んだ時点で、パワーを光子数に書き換える。
+#
+# 光子数はパワーの従属変数で、測ったパワー 1 点につき 1 つある -- Qi と同じ
+# 点数、同じ並び。だから列を読んだその場で x の値として使える。これをデータ
+# セットごとに行うので、`Photon axis` ノードを通す必要も、軸の形を合わせる
+# 必要も無い。
+# ---------------------------------------------------------------------------
+
+
+def test_the_power_is_replaced_by_the_photon_number_when_read(qtbot, tmp_path):
+    fc, node = _flowchart()
+    path = _write(tmp_path, 'CD32_r2', _sweep(POWERS_B, qi0=2.0e5))
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.files = [path]
+    out = fc.output()['dataOut']
+
+    assert out.axes() == ['photon']
+    assert out.axes('Qi [CD32_r2]') == ['photon']
+    # それぞれのデータセットが自分の光子数を持ち込む（内挿しない）
+    photon = np.asarray(out.data_vals('photon'), dtype=float)
+    assert sorted(photon) == sorted([10.0, 100.0, 1000.0] + [10.0, 100.0])
+
+
+def test_every_dataset_keeps_its_own_q_values(qtbot, tmp_path):
+    fc, node = _flowchart()
+    node.files = [_write(tmp_path, 'CD32_r2', _sweep(POWERS_B, qi0=2.0e5))]
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    out = fc.output()['dataOut']
+
+    here = np.asarray(out.data_vals('Qi [this one]'), dtype=float)
+    there = np.asarray(out.data_vals('Qi [CD32_r2]'), dtype=float)
+    assert sorted(here[np.isfinite(here)]) == [1.0e5, 2.0e5, 3.0e5]
+    assert sorted(there[np.isfinite(there)]) == [2.0e5, 4.0e5]
+    # 測っていないところは穴であって、でっち上げた値ではない
+    assert np.isnan(here).sum() == len(POWERS_B)
+
+
+def test_the_x_axis_can_be_put_back_to_the_power(qtbot, tmp_path):
+    fc, node = _flowchart()
+    node.files = [_write(tmp_path, 'CD32_r2', _sweep(POWERS_B))]
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.abscissa = ''
+    out = fc.output()['dataOut']
+
+    assert out.axes() == ['power']
+
+
+def test_a_photon_column_of_nan_falls_back_to_the_power(qtbot, tmp_path):
+    """`line_attenuation_db` を入れ忘れると `photon` は全パワー NaN になる。
+
+    それで空の図を描くのではなく、パワーで重ねて、理由を Status に出す。
+    """
+    messages = []
+    fc, node = _flowchart()
+    node.statusChanged.connect(messages.append)
+    node.files = [_write(tmp_path, 'CD32_r2', _sweep(POWERS_B, photons=False))]
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    out = fc.output()['dataOut']
+
+    assert out.axes() == ['power']
+    assert any('NaN' in m for m in messages)
+
+
+def test_the_photon_axis_node_upstream_does_not_fight_with_this(qtbot, tmp_path):
+    """`Photon axis` を先に通してあっても、同じ軸に落ち着くこと。"""
+    from plottr.node.dependent_axis import swapDependentToAxis
+
+    here, _ = swapDependentToAxis(_sweep(POWERS_A), 'photon', log=False)
+    fc, node = _flowchart()
+    node.files = [_write(tmp_path, 'CD32_r2', _sweep(POWERS_B))]
+    fc.setInput(dataIn=here)
+    out = fc.output()['dataOut']
+
+    assert out.axes() == ['photon']
+    assert len([n for n in out.dependents() if not n.endswith('_err')]) == 2
+
+
+def test_a_log_photon_axis_upstream_is_matched(qtbot, tmp_path):
+    from plottr.node.dependent_axis import swapDependentToAxis
+
+    here, _ = swapDependentToAxis(_sweep(POWERS_A), 'photon', log=True)
+    fc, node = _flowchart()
+    node.abscissa = 'log10_photon'
+    node.files = [_write(tmp_path, 'CD32_r2', _sweep(POWERS_B))]
+    fc.setInput(dataIn=here)
+    out = fc.output()['dataOut']
+
+    assert out.axes() == ['log10_photon']
+    values = np.asarray(out.data_vals('log10_photon'), dtype=float)
+    assert np.allclose(sorted(values), [1.0, 1.0, 2.0, 2.0, 3.0])
+
+
+def test_points_come_out_in_x_order():
+    """パワーは上から下へ測るので、光子数は逆順に入ってくる。"""
+    joined, _ = joinDatasets([('A', _sweep(POWERS_A)), ('B', _sweep(POWERS_B))],
+                             ['Qi'], 'photon')
+    photon = np.asarray(joined.data_vals('photon'), dtype=float)
+    assert list(photon[:3]) == [10.0, 100.0, 1000.0]
+    assert list(photon[3:]) == [10.0, 100.0]
+
+
+# ---------------------------------------------------------------------------
+# 合流したデータを選べること。
+#
+# NaN で埋めた列の「全部 NaN の行」の数はデータセットごとに違う -- 点数が同じ
+# でも、フィットに失敗したパワーの数が違えば違う。plottr 本体はその番号リストを
+# 1 つの配列に積もうとして inhomogeneous shape で落ちていた（`Data selection`
+# で曲線を選んだ瞬間に図が消える、という形で出た）。
+# ---------------------------------------------------------------------------
+
+
+def test_datasets_with_different_numbers_of_failed_fits_can_be_selected():
+    def sweep(qi0, failed):
+        data = _sweep(POWERS_A, qi0=qi0)
+        values = np.asarray(data['Qi']['values'], dtype=float)
+        values[:failed] = np.nan
+        data['Qi']['values'] = values
+        return data
+
+    joined, _ = joinDatasets([('A', sweep(1.0e5, 0)), ('B', sweep(2.0e5, 2))],
+                             ['Qi'], 'photon')
+    assert joined is not None
+    # `Data selection` が通る道。ここが落ちていた。
+    picked = joined.extract(['Qi [A]'])
+    assert picked.axes() == ['photon']
+    assert np.asarray(picked.data_vals('Qi [A]')).size > 0

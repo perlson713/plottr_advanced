@@ -26,7 +26,7 @@ from plottr import QtCore
 from plottr import QtGui, QtWidgets
 
 __all__ = ['ACCENT', 'applyTheme', 'fontSizeForWindow', 'palette',
-           'styleSheet']
+           'styleSheet', 'windowBlock']
 
 #: The one saturated color, used for selection and for the focused control.
 #: Taken from the first color of the plot cycle so that the window and the
@@ -36,24 +36,32 @@ ACCENT = '#1f77b4'
 #: Background of the window, and of the panels sitting on it.
 WINDOW = '#f4f5f7'
 PANEL = '#ffffff'
-BORDER = '#d6d9de'
-TEXT = '#1c1e21'
-MUTED = '#6b7280'
+BORDER = '#c3c8d0'
+TEXT = '#14161a'
+#: Secondary text: section titles, column headers.  Dark enough to read
+#: at a glance -- the grey this started at (#6b7280) was a suggestion of a
+#: label rather than a label.
+MUTED = '#4b5563'
 
 #: Window size the base font size is meant for, and the base size itself.
 #: Sizes scale from here, within bounds that keep a very small window readable
 #: and a very large one from turning into a poster.
+#:
+#: 13px at 1280x800 is a little above what Windows uses for its own menus (9pt,
+#: about 12px).  The first version of this was 10px, which is what a tool
+#: window gets away with and a window full of numbers does not.
 REFERENCE_WINDOW = (1280, 800)
-BASE_FONT_PX = 10
+BASE_FONT_PX = 13
 
-#: Text grows more slowly than the window: at this exponent, doubling the
-#: window makes the text about 60% larger, which keeps a large window from
-#: turning into a poster while still being visibly bigger.
-FONT_SCALE_EXPONENT = 0.7
+#: Text grows more slowly than the window, but it has to grow *visibly*: at
+#: 0.7 the step from a 1280-wide window to a maximised 1920 one was 10px to
+#: 12px, which reads as nothing happening.  At 0.85 the same step is 13px to
+#: 17px.
+FONT_SCALE_EXPONENT = 0.85
 
-#: Bounds on that scale, so a tiny window stays readable and a wall display
+#: Bounds on that scale, so a small window stays readable and a wall display
 #: does not fill with menu text.
-FONT_SCALE_RANGE = (0.8, 1.7)
+FONT_SCALE_RANGE = (0.85, 1.8)
 
 
 def fontSizeForWindow(width: int, height: int, scaling: float = 1.0) -> int:
@@ -68,12 +76,37 @@ def fontSizeForWindow(width: int, height: int, scaling: float = 1.0) -> int:
     scale = ratio ** FONT_SCALE_EXPONENT
     low, high = FONT_SCALE_RANGE
     scale = max(low, min(high, scale))
-    return max(8, int(round(BASE_FONT_PX * scaling * scale)))
+    return max(10, int(round(BASE_FONT_PX * scaling * scale)))
 
 
 #: Marks the block this module appends to a window's own stylesheet, so that
 #: it can be replaced without disturbing what the window set itself.
 FONT_BLOCK = '/* plottr: font follows the window size */'
+
+
+def windowBlock(size: int) -> str:
+    """The rules that follow the window's size.
+
+    Not only the font.  Padding in a stylesheet is in pixels, so a window whose
+    text has grown to 17px but whose buttons still have 3px around it looks
+    cramped in a way that reads as "the font did not change": the spacing
+    around text follows it.  Everything that does not depend on the size stays
+    in :func:`styleSheet`, which is set once on the application.
+    """
+    tight = max(3, round(size * 0.3))
+    snug = max(5, round(size * 0.5))
+    wide = max(8, round(size * 0.9))
+    return (
+        f'QWidget {{ font-size: {size}px; }}\n'
+        f'QPushButton {{ padding: {tight}px {wide}px; }}\n'
+        f'QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit,'
+        f' QTextEdit {{ padding: {tight}px {snug}px; }}\n'
+        f'QToolBar QToolButton {{ padding: {tight}px {snug}px; }}\n'
+        f'QTabBar::tab {{ padding: {tight}px {wide}px; }}\n'
+        f'QHeaderView::section {{ padding: {tight}px {snug}px; }}\n'
+        f'QMenu::item {{ padding: {tight}px {wide + snug}px {tight}px {wide}px; }}\n'
+        f'QDockWidget::title {{ padding: {tight}px {snug}px; }}\n'
+    )
 
 
 class _WindowFontScaler(QtCore.QObject):
@@ -95,8 +128,15 @@ class _WindowFontScaler(QtCore.QObject):
         super().__init__()
         self.scaling = scaling
 
+    #: Events after which a window's size is meaningful.  ``Show`` matters as
+    #: much as ``Resize``: a window that opens at its final size and is never
+    #: dragged gets no resize event, and used to keep the application's base
+    #: size while every other window scaled.
+    EVENTS = (QtCore.QEvent.Resize, QtCore.QEvent.Show,
+              QtCore.QEvent.WindowStateChange)
+
     def eventFilter(self, obj: Any, event: Any) -> bool:
-        if event.type() == QtCore.QEvent.Resize and isinstance(
+        if event.type() in self.EVENTS and isinstance(
                 obj, QtWidgets.QWidget) and obj.isWindow():
             self.applyTo(obj)
         return False
@@ -105,10 +145,42 @@ class _WindowFontScaler(QtCore.QObject):
         size = fontSizeForWindow(window.width(), window.height(), self.scaling)
         sheet = window.styleSheet() or ''
         own = sheet.split(FONT_BLOCK)[0]
-        block = f'{FONT_BLOCK}\nQWidget {{ font-size: {size}px; }}\n'
+        block = f'{FONT_BLOCK}\n{windowBlock(size)}'
         if sheet == own + block:
             return  # already at this size; re-applying re-polishes every widget
         window.setStyleSheet(own + block)
+        # After Qt has re-polished with the new font: columns measured at 13px
+        # cut their text off at 17px, and `Qi [CD32_r1]` and `Qi [CD32_r2]`
+        # then read the same.
+        QtCore.QTimer.singleShot(0, lambda: widenColumns(window))
+
+
+def widenColumns(window: Any) -> None:
+    """Give every column in the window room for what is in it.
+
+    Only ever widens.  A column the operator dragged wider stays wider; one
+    that is too narrow to show its text -- which is what happens when the font
+    grows with the window -- is opened up to fit.
+    """
+    try:
+        views = window.findChildren(QtWidgets.QTreeView) \
+            + window.findChildren(QtWidgets.QTableView)
+    except RuntimeError:       # the window went away while we were waiting
+        return
+    for view in views:
+        try:
+            header = view.header() if hasattr(view, 'header') \
+                else view.horizontalHeader()
+            for column in range(view.model().columnCount()):
+                # The rows and the header are measured separately: the header
+                # is what clips first for a short column ("Dependencies" over
+                # "photon").
+                needed = max(view.sizeHintForColumn(column),
+                             header.sectionSizeHint(column))
+                if needed > view.columnWidth(column):
+                    view.setColumnWidth(column, needed)
+        except (RuntimeError, AttributeError):  # deleted, or no model yet
+            continue
 
 
 def palette() -> QtGui.QPalette:
@@ -155,11 +227,10 @@ def styleSheet(scaling: float = 1.0) -> str:
     }}
     QDockWidget::title {{
         background: {WINDOW};
-        color: {MUTED};
+        color: {TEXT};
+        font-weight: bold;
         padding: 4px 8px;
         border-bottom: 1px solid {BORDER};
-        text-transform: uppercase;
-        letter-spacing: 1px;
     }}
     QGroupBox {{
         background: {PANEL};
