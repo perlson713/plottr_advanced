@@ -239,3 +239,64 @@ def test_plot_text_is_resized_with_the_canvas(plotWidget):
     # 描き直しても大きいまま（rcParams が先に効く）
     plotWidget.setData(data)
     assert plot.fig.axes[0].xaxis.label.get_fontsize() == pytest.approx(large, rel=0.05)
+
+
+# ---------------------------------------------------------------------------
+# 振幅・位相を単体で見る。
+# ---------------------------------------------------------------------------
+
+
+def _complexTrace():
+    f = np.linspace(9.99e9, 1.001e10, 21)
+    z = 1 - 0.8 / (1 + 2j * 5000 * (f - 1.0e10) / 1.0e10)
+    data = DataDict(frequency=dict(unit='Hz'), s11=dict(axes=['frequency']))
+    data.validate()
+    data.add_data(frequency=f, s11=z)
+    return data
+
+
+def test_magnitude_alone_uses_one_panel(plotWidget):
+    from plottr.plot.base import ComplexRepresentation
+
+    plotWidget.setData(_complexTrace())
+    plotWidget._complexPreferenceFromToolBar(ComplexRepresentation.mag)
+
+    fig = plotWidget.plot.fig
+    assert len(fig.axes) == 1
+    labels = [str(line.get_label()) for line in fig.axes[0].get_lines()]
+    assert labels == ['s11 (Mag)']
+    # 振幅は非負
+    values = fig.axes[0].get_lines()[0].get_ydata()
+    assert np.all(np.asarray(values) >= 0)
+
+
+def test_phase_alone_uses_one_panel(plotWidget):
+    from plottr.plot.base import ComplexRepresentation
+
+    plotWidget.setData(_complexTrace())
+    plotWidget._complexPreferenceFromToolBar(ComplexRepresentation.phase)
+
+    fig = plotWidget.plot.fig
+    assert len(fig.axes) == 1
+    labels = [str(line.get_label()) for line in fig.axes[0].get_lines()]
+    assert labels == ['s11 (Phase)']
+    values = np.asarray(fig.axes[0].get_lines()[0].get_ydata())
+    assert np.all(np.abs(values) <= np.pi + 1e-9)
+
+
+def test_mag_and_phase_together_still_uses_two_panels(plotWidget):
+    from plottr.plot.base import ComplexRepresentation
+
+    plotWidget.setData(_complexTrace())
+    plotWidget._complexPreferenceFromToolBar(ComplexRepresentation.magAndPhase)
+    assert len(plotWidget.plot.fig.axes) == 2
+
+
+def test_the_toolbar_offers_them(plotWidget):
+    from plottr.plot.base import ComplexRepresentation
+
+    plotWidget.setData(_complexTrace())
+    actions = plotWidget.plotOptionsToolBar.ComplexActions
+    for rep in (ComplexRepresentation.mag, ComplexRepresentation.phase):
+        assert rep in actions
+        assert actions[rep].isEnabled()

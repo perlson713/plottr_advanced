@@ -267,6 +267,12 @@ class ComplexRepresentation(LabeledOptions):
     #: real and imaginary, separated
     realAndImagSeparate = "Real/Imag (split)"
 
+    #: magnitude only
+    mag = "Mag"
+
+    #: phase only
+    phase = "Phase"
+
     #: magnitude and phase
     magAndPhase = "Mag/Phase"
 
@@ -588,6 +594,26 @@ class AutoFigureMaker:
                 plotItem.labels[-1] = 'Real'
             else:
                 plotItem.labels[-1] = label + ' (Real)'
+            return [plotItem]
+
+        elif self.complexRepresentation in (ComplexRepresentation.mag,
+                                            ComplexRepresentation.phase):
+            # One panel, not two: comparing the depth of a resonance across
+            # several datasets is unreadable when half the window is the phase.
+            data = plotItem.data[-1]
+            if self.complexRepresentation is ComplexRepresentation.mag:
+                # the isinstance check avoids a numpy ComplexWarning on the
+                # MaskedArrays that almost everything here is
+                plotItem.data[-1] = (np.ma.abs(data).real
+                                     if isinstance(data, np.ma.MaskedArray)
+                                     else np.abs(data))
+                part = 'Mag'
+            else:
+                plotItem.data[-1] = np.angle(data)
+                part = 'Phase'
+
+            assert isinstance(plotItem.labels, list)
+            plotItem.labels[-1] = part if label == '' else f'{label} ({part})'
             return [plotItem]
 
         elif self.complexRepresentation in \

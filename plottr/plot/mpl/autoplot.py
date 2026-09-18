@@ -468,6 +468,18 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
         self.plotReImSep.triggered.connect(
             lambda: self.selectComplexType(ComplexRepresentation.realAndImagSeparate))
 
+        self.plotMag = self.addAction('Mag')
+        self.plotMag.setCheckable(True)
+        self.plotMag.setToolTip('Magnitude only, in one panel.')
+        self.plotMag.triggered.connect(
+            lambda: self.selectComplexType(ComplexRepresentation.mag))
+
+        self.plotPhase = self.addAction('Phase')
+        self.plotPhase.setCheckable(True)
+        self.plotPhase.setToolTip('Phase only, in one panel.')
+        self.plotPhase.triggered.connect(
+            lambda: self.selectComplexType(ComplexRepresentation.phase))
+
         self.plotMagPhase = self.addAction('Mag/Phase')
         self.plotMagPhase.setCheckable(True)
         self.plotMagPhase.triggered.connect(
@@ -558,6 +570,8 @@ class AutoPlotToolBar(QtWidgets.QToolBar):
             ComplexRepresentation.real: self.plotReal,
             ComplexRepresentation.realAndImag: self.plotReIm,
             ComplexRepresentation.realAndImagSeparate: self.plotReImSep,
+            ComplexRepresentation.mag: self.plotMag,
+            ComplexRepresentation.phase: self.plotPhase,
             ComplexRepresentation.magAndPhase: self.plotMagPhase,
             ComplexRepresentation.complexPlane: self.plotComplexPlane,
         })
@@ -842,6 +856,8 @@ class AutoPlot(MPLPlotWidget):
                     ComplexRepresentation.real,
                     ComplexRepresentation.realAndImag,
                     ComplexRepresentation.realAndImagSeparate,
+                    ComplexRepresentation.mag,
+                    ComplexRepresentation.phase,
                     ComplexRepresentation.magAndPhase,
                     ComplexRepresentation.complexPlane,
                 )

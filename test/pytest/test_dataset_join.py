@@ -361,3 +361,71 @@ def test_many_datasets_join(qtbot, tmp_path):
     assert len(curves) == 7
     assert np.asarray(out.data_vals('power')).size == \
         len(POWERS_A) + 6 * len(POWERS_B)
+
+
+def test_a_quantity_is_joined_on_its_own_axes_not_the_whole_grid():
+    """`Qi` は `power` に載っている。データセット全体の軸で合流すると
+    周波数グリッドにも載ってしまい、5001 点 × 8 パワー × 6 本で 24 万行に
+    なる（実測: 1001 点で 48 行のはずが 48048 行）。"""
+    from plottr.node.dataset_join import joinAxes
+
+    def withTrace(fr, powers):
+        freq = np.linspace(fr - 1e6, fr + 1e6, 50)
+        data = DataDict(
+            frequency=dict(unit='Hz'), power=dict(unit='dBm'),
+            s11_raw=dict(axes=['frequency', 'power']),
+            Qi=dict(axes=['power']), Qi_err=dict(axes=['power']),
+        )
+        data.validate()
+        for index, power in enumerate(powers):
+            data.add_data(frequency=freq, power=power,
+                          s11_raw=np.ones(freq.size, dtype=complex),
+                          Qi=1.0e5 * (index + 1), Qi_err=1.0e3)
+        return data
+
+    a, b = withTrace(1.0e10, POWERS_A), withTrace(1.2e10, POWERS_B)
+    assert joinAxes(a, ['Qi']) == ['power']
+
+    joined, summary = joinDatasets([('A', a), ('B', b)], ['Qi'])
+    assert joined.axes() == ['power']
+    assert joined.axes('Qi [A]') == ['power']
+    assert np.asarray(joined.data_vals('power')).size == \
+        len(POWERS_A) + len(POWERS_B)
+    # 測った値はそのまま
+    qi = np.asarray(joined.data_vals('Qi [A]'), dtype=float)
+    assert np.allclose(qi[:len(POWERS_A)], [1.0e5, 2.0e5, 3.0e5])
+
+
+def test_a_trace_is_still_joined_on_both_axes():
+    """トレース同士を比べるときは、周波数軸も要る。"""
+    from plottr.node.dataset_join import joinAxes
+
+    freq = np.linspace(9.99e9, 1.001e10, 8)
+    data = DataDict(frequency=dict(unit='Hz'), power=dict(unit='dBm'),
+                    s11_raw=dict(axes=['frequency', 'power']),
+                    Qi=dict(axes=['power']))
+    data.validate()
+    for power in POWERS_A:
+        data.add_data(frequency=freq, power=power,
+                      s11_raw=np.ones(freq.size, dtype=complex), Qi=1.0e5)
+
+    assert set(joinAxes(data, ['s11_raw'])) == {'frequency', 'power'}
+
+
+def test_columns_on_other_axes_are_reported():
+    freq = np.linspace(9.99e9, 1.001e10, 4)
+    def make():
+        data = DataDict(frequency=dict(unit='Hz'), power=dict(unit='dBm'),
+                        s11_raw=dict(axes=['frequency', 'power']),
+                        Qi=dict(axes=['power']))
+        data.validate()
+        for power in POWERS_A:
+            data.add_data(frequency=freq, power=power,
+                          s11_raw=np.ones(4, dtype=complex), Qi=1.0e5)
+        return data
+
+    joined, summary = joinDatasets([('A', make()), ('B', make())],
+                                   ['Qi', 's11_raw'])
+    assert joined.axes() == ['power']
+    assert 's11_raw' in summary          # 黙って落とさない
+    assert not any('s11_raw' in name for name in joined.dependents())

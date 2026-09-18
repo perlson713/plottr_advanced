@@ -49,7 +49,8 @@ from .dependent_axis import swapDependentToAxis
 from .node import Node, NodeWidget, updateOption
 
 __all__ = ['DEFAULT_COLUMNS', 'JoinDatasets', 'JoinDatasetsWidget',
-           'datasetLabel', 'datasetStamp', 'joinDatasets', 'loadDataset',
+           'datasetLabel', 'datasetStamp', 'joinAxes', 'joinDatasets',
+           'loadDataset',
            'parseColumns', 'seriesName', 'uniqueLabels', 'wantedColumns']
 
 #: ddh5 group the measurement scripts write into.
@@ -195,6 +196,36 @@ def reshapeLike(data: DataDictBase, axes: Sequence[str]) \
     return data, ''
 
 
+def joinAxes(data: DataDictBase, columns: Sequence[str]) -> List[str]:
+    """The axes the compared columns live on.
+
+    `Qi` lives on `power`; the trace it was fitted from lives on `frequency`
+    *and* `power`.  Joining on the dataset's full set of axes would put `Qi` on
+    the frequency grid too -- one value repeated at every frequency -- and a
+    six-resonator comparison of 5001-point sweeps becomes a million rows of
+    which fifty are the actual points.  So the axes come from the columns being
+    compared, not from the dataset.
+
+    With no columns named (bring everything), there is no single answer -- the
+    dataset holds quantities on different axes -- and the full set is used.
+    """
+    wanted = wantedColumns(data, columns)
+    if not columns or not wanted:
+        return list(data.axes())
+    return list(data.axes(wanted[0]))
+
+
+def _rowsOn(data: DataDictBase, axes: Sequence[str]) -> np.ndarray:
+    """Indices of one row per point of ``axes``, in the order they appear."""
+    size = np.asarray(data.data_vals(list(data.axes())[0])).size
+    if set(axes) == set(data.axes()):
+        return np.arange(size)
+    keys = np.stack([np.asarray(data.data_vals(a)).flatten() for a in axes],
+                    axis=-1)
+    _, index = np.unique(keys, axis=0, return_index=True)
+    return np.sort(index)
+
+
 def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
                  columns: Sequence[str] = ()) \
         -> Tuple[Optional[DataDictBase], str]:
@@ -216,35 +247,47 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
     if len(parts) == 1:
         return parts[0][1], ''
 
-    axes = list(parts[0][1].axes())
+    axes = joinAxes(parts[0][1], columns)
     for label, data in parts[1:]:
         # The order does not have to match: a ddh5 read back can list the axes
         # the other way round, and each dataset's own columns stay aligned with
         # each other whatever the order is.
-        if set(data.axes()) != set(axes):
+        if not set(axes) <= set(data.axes()):
             return None, (f'`{label}` has axes {", ".join(data.axes())}, '
                           f'not {", ".join(axes)}')
 
-    # Every dataset keeps its own rows; the others are NaN there.
-    lengths = [np.asarray(data.data_vals(axes[0])).size for _, data in parts]
+    # One row per point of those axes, per dataset.  Every dataset keeps its
+    # own rows; the others are NaN there.
+    rows = [_rowsOn(data, axes) for _, data in parts]
+    lengths = [int(index.size) for index in rows]
     total = int(sum(lengths))
     offsets = np.cumsum([0] + lengths)
 
     out = DataDict()
+    first = parts[0][1]
     for axis in axes:
-        values = np.concatenate(
-            [np.asarray(data.data_vals(axis)).flatten() for _, data in parts])
-        first = parts[0][1]
+        values = np.concatenate([
+            np.asarray(data.data_vals(axis)).flatten()[index]
+            for (_, data), index in zip(parts, rows)])
         out[axis] = dict(values=values, axes=[],
                          unit=first.get(axis, {}).get('unit', ''),
                          label=first.get(axis, {}).get('label', ''))
 
-    for index, (label, data) in enumerate(parts):
-        start, stop = int(offsets[index]), int(offsets[index + 1])
+    dropped: List[str] = []
+    for number, ((label, data), index) in enumerate(zip(parts, rows)):
+        start, stop = int(offsets[number]), int(offsets[number + 1])
+        rowCount = np.asarray(
+            data.data_vals(list(data.axes())[0])).size
         for dependent in wantedColumns(data, columns):
             values = np.asarray(data.data_vals(dependent)).flatten()
-            if values.size != stop - start:
-                continue  # not on these axes; it cannot be placed
+            onOtherAxes = columns and set(data.axes(dependent)) != set(axes)
+            if onOtherAxes or values.size != rowCount:
+                # A trace, when quality factors are being compared; or a column
+                # that does not line up with the dataset's rows at all.
+                if dependent not in dropped:
+                    dropped.append(dependent)
+                continue
+            values = values[index]
             column = np.full(total, np.nan, dtype=_joinDtype(values))
             column[start:stop] = values
             out[seriesName(dependent, label)] = dict(
@@ -267,6 +310,9 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
     if columns:
         summary += '; columns: ' + ', '.join(sorted(
             {name.rsplit(' [', 1)[0] for name in out.dependents()}))
+    if dropped:
+        summary += ('; not on ' + ', '.join(axes) + ': '
+                    + ', '.join(sorted(dropped)))
     return out, summary
 
 
