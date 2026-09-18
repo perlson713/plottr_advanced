@@ -49,8 +49,8 @@ from .dependent_axis import swapDependentToAxis
 from .node import Node, NodeWidget, updateOption
 
 __all__ = ['DEFAULT_COLUMNS', 'JoinDatasets', 'JoinDatasetsWidget',
-           'datasetLabel', 'joinDatasets', 'loadDataset', 'parseColumns',
-           'seriesName', 'wantedColumns']
+           'datasetLabel', 'datasetStamp', 'joinDatasets', 'loadDataset',
+           'parseColumns', 'seriesName', 'uniqueLabels', 'wantedColumns']
 
 #: ddh5 group the measurement scripts write into.
 GROUPNAME = 'data'
@@ -84,6 +84,51 @@ def datasetLabel(path: str | Path) -> str:
         if tail:
             return tail
     return name
+
+
+#: The timestamp a measurement folder starts with: 2026-09-18T120001_<id>-<name>.
+_STAMP = re.compile(r'^(?P<date>\d{4}-\d{2}-\d{2})T(?P<hour>\d{2})(?P<minute>\d{2})')
+
+
+def datasetStamp(path: str | Path) -> str:
+    """When a dataset was measured, short enough for a legend.
+
+    Used to tell apart datasets that carry the same name -- the same resonator
+    measured twice is exactly the comparison this node is for.
+    """
+    folder = Path(path)
+    if folder.suffix:
+        folder = folder.parent
+    found = _STAMP.match(folder.name)
+    if not found:
+        return ''
+    return f"{found['date'][5:]} {found['hour']}:{found['minute']}"
+
+
+def uniqueLabels(paths: Sequence[str | Path], fallback: str = 'dataset') \
+        -> List[str]:
+    """One distinct label per dataset.
+
+    Labels end up in column names, so two datasets sharing one would land in
+    the same column: the second would overwrite the first, and a comparison of
+    four datasets would quietly draw two curves.  Where names collide, the
+    measurement time tells them apart; where even that is the same, a number
+    does.
+    """
+    names = [datasetLabel(path) or fallback for path in paths]
+    repeated = {name for name in names if names.count(name) > 1}
+
+    labels: List[str] = []
+    for path, name in zip(paths, names):
+        if name in repeated:
+            stamp = datasetStamp(path)
+            name = f'{name} {stamp}'.strip() if stamp else name
+        unique, number = name, 2
+        while unique in labels:
+            unique = f'{name} #{number}'
+            number += 1
+        labels.append(unique)
+    return labels
 
 
 def seriesName(name: str, label: str) -> str:
@@ -225,17 +270,17 @@ def joinDatasets(parts: Sequence[Tuple[str, DataDictBase]],
     return out, summary
 
 
-def _thisLabel(data: DataDictBase) -> str:
-    """Name for the dataset the window was opened on.
+def _thisPath(data: DataDictBase) -> str:
+    """File the window was opened on, as the loader recorded it.
 
-    The loader records the file it read as the ``title`` meta field; datasets
-    that arrive some other way have no such field, and get a neutral name.
+    The loader puts it in the ``title`` meta field; datasets that arrive some
+    other way have none, and are named by the fallback.
     """
     try:
         title = data.meta_val('title')
     except Exception:  # noqa: BLE001 -- absent, or a meta store without it
         title = None
-    return datasetLabel(str(title)) if title else 'this one'
+    return str(title) if title else ''
 
 
 def _expanded(data: DataDictBase) -> DataDictBase:
@@ -417,10 +462,15 @@ class JoinDatasets(Node):
             return dict(dataOut=dataIn)
 
         axes = list(dataIn.axes())
-        parts: List[Tuple[str, DataDictBase]] = [(_thisLabel(dataIn), dataIn)]
         notes: List[str] = []
 
-        for path in self._files:
+        # All the labels at once: they have to be distinct, and that can only
+        # be decided by looking at them together.
+        labels = uniqueLabels([_thisPath(dataIn)] + list(self._files),
+                              fallback='this one')
+        parts: List[Tuple[str, DataDictBase]] = [(labels[0], dataIn)]
+
+        for path, label in zip(self._files, labels[1:]):
             try:
                 extra = loadDataset(path)
             except Exception as exc:  # noqa: BLE001 -- never take the viewer down
@@ -428,9 +478,9 @@ class JoinDatasets(Node):
                 continue
             shaped, why = reshapeLike(extra, axes)
             if shaped is None:
-                notes.append(f'{datasetLabel(path)}: {why}')
+                notes.append(f'{label}: {why}')
                 continue
-            parts.append((datasetLabel(path), shaped))
+            parts.append((label, shaped))
 
         if len(parts) < 2:
             self.statusChanged.emit('; '.join(notes) or 'nothing added')

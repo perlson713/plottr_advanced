@@ -287,3 +287,77 @@ def test_the_title_survives_the_join(qtbot, tmp_path):
 
     out = fc.output()['dataOut']
     assert out.meta_val('title') == here.meta_val('title')
+
+
+# ---------------------------------------------------------------------------
+# データセットの名前は必ず区別できること。
+#
+# ラベルは列名に入るので、2 つが同じラベルだと同じ列になり、後の方が前の方を
+# 上書きする -- 4 つ重ねたつもりで 2 本しか描かれない。
+# ---------------------------------------------------------------------------
+
+
+def test_datasets_with_the_same_name_still_get_their_own_curve(qtbot, tmp_path):
+    from plottr.node.dataset_join import uniqueLabels
+
+    paths = []
+    for index in range(4):
+        folder = tmp_path / f'2026-09-18T12000{index}_ab-CD32_r1'
+        folder.mkdir(parents=True)
+        path = folder / 'data.ddh5'
+        datadict_to_hdf5(_sweep(POWERS_B, qi0=1.0e5 * (index + 1)),
+                         str(path), groupname='data')
+        paths.append(str(path))
+
+    labels = uniqueLabels(paths)
+    assert len(set(labels)) == 4, labels
+    assert all(label.startswith('CD32_r1') for label in labels)
+
+    fc, node = _flowchart()
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.files = paths
+    out = fc.output()['dataOut']
+
+    curves = [name for name in out.dependents() if not name.endswith('_err')]
+    assert len(curves) == 5      # 開いているもの + 足した 4 つ
+
+
+def test_the_measurement_time_tells_repeats_apart():
+    from plottr.node.dataset_join import datasetStamp, uniqueLabels
+
+    assert datasetStamp('/x/2026-09-18T143000_ab-CD32_r1/data.ddh5') == '09-18 14:30'
+    assert datasetStamp('/x/not-a-measurement/data.ddh5') == ''
+
+    labels = uniqueLabels(['/x/2026-09-18T090000_ab-CD32_r1/data.ddh5',
+                           '/x/2026-09-18T143000_ab-CD32_r1/data.ddh5'])
+    assert labels == ['CD32_r1 09-18 09:00', 'CD32_r1 09-18 14:30']
+
+
+def test_labels_stay_plain_when_the_names_differ():
+    from plottr.node.dataset_join import uniqueLabels
+
+    assert uniqueLabels(['/x/2026-09-18T090000_ab-CD32_r1/data.ddh5',
+                         '/x/2026-09-18T143000_ab-CD32_r2/data.ddh5']) \
+        == ['CD32_r1', 'CD32_r2']
+
+
+def test_many_datasets_join(qtbot, tmp_path):
+    """重ねられる数に上限は無い。"""
+    paths = []
+    for index in range(6):
+        folder = tmp_path / f'2026-09-18T12000{index}_ab-CD32_r{index}'
+        folder.mkdir(parents=True)
+        path = folder / 'data.ddh5'
+        datadict_to_hdf5(_sweep(POWERS_B, qi0=1.0e5 * (index + 1)),
+                         str(path), groupname='data')
+        paths.append(str(path))
+
+    fc, node = _flowchart()
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.files = paths
+    out = fc.output()['dataOut']
+
+    curves = [name for name in out.dependents() if not name.endswith('_err')]
+    assert len(curves) == 7
+    assert np.asarray(out.data_vals('power')).size == \
+        len(POWERS_A) + 6 * len(POWERS_B)

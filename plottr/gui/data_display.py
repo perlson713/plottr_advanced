@@ -31,6 +31,12 @@ def matchSelection(previous: Sequence[str], available: Sequence[str]) -> List[st
     the operator was looking at ``Qi`` and now wants both of them, not an empty
     plot.  The reverse happens when the comparison is removed again.
 
+    The selection follows the *quantity*, not the exact name: having chosen
+    ``Qi``, every series of ``Qi`` in the dataset is selected.  That is what
+    makes a third and a fourth dataset appear when they are added -- matching
+    names exactly would keep showing the first two and silently ignore the
+    rest, which reads as a limit on how many can be compared.
+
     :param previous: what was selected before.
     :param available: what the dataset has now.
     :return: the names to select, in the order they appear in ``available``.
@@ -38,17 +44,8 @@ def matchSelection(previous: Sequence[str], available: Sequence[str]) -> List[st
     if not previous:
         return []
 
-    available = list(available)
-    wanted = set()
-    for name in previous:
-        if name in available:
-            wanted.add(name)
-            continue
-        base = unlabelledName(name)
-        wanted |= {other for other in available
-                   if unlabelledName(other) == base}
-
-    return [name for name in available if name in wanted]
+    bases = {unlabelledName(name) for name in previous}
+    return [name for name in available if unlabelledName(name) in bases]
 
 
 class DataSelectionWidget(QtWidgets.QTreeWidget):

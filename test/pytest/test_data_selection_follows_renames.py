@@ -93,3 +93,23 @@ def test_the_widget_keeps_the_selection_across_a_rebuild(qtbot):
     # 作り直しの途中の「空」ではなく、最終的な選択を 1 回だけ知らせる
     assert emitted and emitted[-1] == ['Qi [A]', 'Qi [B]']
     assert [] not in emitted
+
+
+def test_a_third_and_fourth_dataset_join_the_selection():
+    """選択は「量」に付く。名前を厳密に照合すると、3 つ目以降が無視され、
+    重ねられる数に上限があるように見える（実際にそう報告された）。"""
+    two = ['Qi [A]', 'Qi [A]_err', 'Qi [B]', 'Qi [B]_err']
+    four = two + ['Qi [C]', 'Qi [C]_err', 'Qi [D]', 'Qi [D]_err']
+
+    selected = matchSelection(['Qi'], two)
+    assert selected == ['Qi [A]', 'Qi [B]']
+
+    # ここで止まっていた: 既にある名前が見つかるので、増えた分を拾わなかった
+    assert matchSelection(selected, four) == ['Qi [A]', 'Qi [B]', 'Qi [C]', 'Qi [D]']
+
+
+def test_other_quantities_are_not_dragged_in():
+    available = ['Qi [A]', 'Qi [B]', 'Ql [A]', 'Ql [B]', 'Qi [A]_err']
+    assert matchSelection(['Qi'], available) == ['Qi [A]', 'Qi [B]']
+    assert matchSelection(['Qi', 'Ql'], available) == [
+        'Qi [A]', 'Qi [B]', 'Ql [A]', 'Ql [B]']
