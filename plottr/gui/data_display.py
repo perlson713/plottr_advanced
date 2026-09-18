@@ -3,10 +3,52 @@
 UI elements for inspecting data structure and content.
 """
 
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Sequence
 
 from .. import QtWidgets, Signal, Slot
 from ..data.datadict import DataDictBase
+
+
+def unlabelledName(name: str) -> str:
+    """The name a field has before a dataset label is put in it.
+
+    Comparing datasets turns ``Qi`` into ``Qi [CD32_r1]``, and its error bars
+    into ``Qi [CD32_r1]_err`` -- the label goes *before* the ``_err`` so that
+    the two stay paired.  Taking the label back out has to put that suffix
+    back, or an error column looks like the quantity itself.
+    """
+    head, marker, rest = name.partition(' [')
+    if not marker:
+        return name
+    _, closed, suffix = rest.partition(']')
+    return head + suffix if closed else name
+
+
+def matchSelection(previous: Sequence[str], available: Sequence[str]) -> List[str]:
+    """Carry a selection over to a dataset whose fields were renamed.
+
+    Comparing datasets renames ``Qi`` to ``Qi [CD32_r1]`` and ``Qi [CD32_r2]``:
+    the operator was looking at ``Qi`` and now wants both of them, not an empty
+    plot.  The reverse happens when the comparison is removed again.
+
+    :param previous: what was selected before.
+    :param available: what the dataset has now.
+    :return: the names to select, in the order they appear in ``available``.
+    """
+    if not previous:
+        return []
+
+    available = list(available)
+    wanted = set()
+    for name in previous:
+        if name in available:
+            wanted.add(name)
+            continue
+        base = unlabelledName(name)
+        wanted |= {other for other in available
+                   if unlabelledName(other) == base}
+
+    return [name for name in available if name in wanted]
 
 
 class DataSelectionWidget(QtWidgets.QTreeWidget):
@@ -58,7 +100,17 @@ class DataSelectionWidget(QtWidgets.QTreeWidget):
             self.resizeColumnToContents(i)
 
     def setData(self, structure: DataDictBase, shapes: dict) -> None:
-        """Set data; populates the tree."""
+        """Set data; populates the tree.
+
+        The selection is kept across the rebuild, following renames where it
+        can (see :func:`.matchSelection`).  Without this, anything that changes
+        the *shape* of the dataset -- turning a dependent into the axis, adding
+        a second dataset to compare against -- drops the selection, and since
+        nothing selected means nothing plotted, the window keeps showing the
+        previous figure: the change looks like it did nothing.
+        """
+        previous = self.getSelectedData()
+
         if structure is not None:
             self._dataShapes = shapes
             self._dataStructure = structure
@@ -66,9 +118,20 @@ class DataSelectionWidget(QtWidgets.QTreeWidget):
             self._dataShapes = {}
             self._dataStructure = DataDictBase()
 
-        self.clear()
-        if structure is not None:
-            self._populate()
+        # One update at the end, not one for the emptied tree and one for the
+        # repopulated one.
+        blocked = self.blockSignals(True)
+        try:
+            self.clear()
+            if structure is not None:
+                self._populate()
+            restored = matchSelection(previous, list(self.dataItems))
+            self.setSelectedData(restored)
+        finally:
+            self.blockSignals(blocked)
+
+        if restored != previous:
+            self.emitSelection()
 
     def setShape(self, shape: Dict[str, Tuple[int, ...]]) -> None:
         """Set shapes of given elements"""

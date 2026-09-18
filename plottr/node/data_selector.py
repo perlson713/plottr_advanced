@@ -165,7 +165,11 @@ class DataSelector(Node):
         # this is the actual operation of the node
         data = self._reduceData(data)
         if data is None:
-            return None
+            # Nothing selected (or nothing selectable): say so, rather than
+            # returning without an output.  Returning nothing leaves the plot
+            # showing the previous dataset, which reads as "the change I just
+            # made did nothing" instead of "there is nothing to draw".
+            return dict(dataOut=None)
 
         # it is possible at this stage that we have data in DataDictBase format
         # which we cannot process further down the line.
