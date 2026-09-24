@@ -80,7 +80,22 @@ class DataSelectionWidget(QtWidgets.QTreeWidget):
         self._readonly = readonly
 
         self.setSelectionMode(self.MultiSelection)
+        self.setAlternatingRowColors(True)
         self.itemSelectionChanged.connect(self.emitSelection)
+
+    #: Rows the list asks for before it has to be scrolled.  Comparing six
+    #: resonators puts twelve rows in here (a quantity and its error bars
+    #: each), and a list that shows half of them reads as a list that only
+    #: took half of them.
+    WANTED_ROWS = 14
+
+    def _askForRoom(self) -> None:
+        row = self.sizeHintForRow(0) if self.topLevelItemCount() else 0
+        if row <= 0:
+            row = self.fontMetrics().height() + 6
+        rows = min(self.WANTED_ROWS, max(4, self.topLevelItemCount()))
+        header = self.header().height() if self.header() is not None else 0
+        self.setMinimumHeight(rows * row + header + 2 * self.frameWidth() + 4)
 
     def _makeItem(self, name: str) -> QtWidgets.QTreeWidgetItem:
         shape = self._dataShapes.get(name, tuple())
@@ -108,6 +123,7 @@ class DataSelectionWidget(QtWidgets.QTreeWidget):
 
         for i in range(3):
             self.resizeColumnToContents(i)
+        self._askForRoom()
 
     def setData(self, structure: DataDictBase, shapes: dict) -> None:
         """Set data; populates the tree.

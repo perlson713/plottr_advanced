@@ -560,3 +560,60 @@ def test_datasets_with_different_numbers_of_failed_fits_can_be_selected():
     picked = joined.extract(['Qi [A]'])
     assert picked.axes() == ['photon']
     assert np.asarray(picked.data_vals('Qi [A]')).size > 0
+
+
+# ---------------------------------------------------------------------------
+# 何本足したのかが見えること。
+#
+# 一覧は高さが 110 px に固定されていて、ドックの中では表示領域が 20 px に
+# なっていた: 7 本足しても 1 行しか出ず、スクロールバーも出ないので、
+# 「5 つ以上は取り込めない」と読むのが当然だった（実際そう報告された）。
+# ---------------------------------------------------------------------------
+
+
+def test_every_added_file_is_listed_and_counted(qtbot, tmp_path):
+    from plottr.node.dataset_join import _JoinOptionsWidget
+
+    widget = _JoinOptionsWidget()
+    qtbot.addWidget(widget)
+    paths = [_write(tmp_path, f'CD32_r{i}', _sweep(POWERS_B)) for i in range(2, 9)]
+    widget.setFiles(paths)
+
+    assert widget.list.count() == len(paths)
+    assert widget.files() == paths
+    # 開いているデータセットを足した数が出ること
+    assert widget.count.text() == f'{len(paths) + 1} datasets'
+
+
+def test_the_list_is_tall_enough_for_what_is_in_it(qtbot, tmp_path):
+    from plottr.node.dataset_join import _JoinOptionsWidget
+
+    widget = _JoinOptionsWidget()
+    qtbot.addWidget(widget)
+    widget.show()
+
+    few = [_write(tmp_path, f'CD32_r{i}', _sweep(POWERS_B)) for i in range(2, 4)]
+    widget.setFiles(few)
+    small = widget.list.minimumHeight()
+
+    many = [_write(tmp_path, f'CD32_r{i}', _sweep(POWERS_B)) for i in range(2, 12)]
+    widget.setFiles(many)
+
+    assert widget.list.minimumHeight() > small
+    row = widget.list.sizeHintForRow(0)
+    assert widget.list.minimumHeight() >= _JoinOptionsWidget.MIN_ROWS * row
+    # ただしパネルが窓を占領しないこと
+    assert widget.list.minimumHeight() <= (_JoinOptionsWidget.MAX_ROWS + 1) * row
+
+
+def test_many_datasets_all_reach_the_plot(qtbot, tmp_path):
+    """8 本足したら 8 本とも列になること（上限は無い）。"""
+    paths = [_write(tmp_path, f'CD32_r{i}', _sweep(POWERS_B, qi0=1.0e5 * i))
+             for i in range(2, 10)]
+    fc, node = _flowchart()
+    fc.setInput(dataIn=_sweep(POWERS_A))
+    node.files = paths
+
+    out = fc.output()['dataOut']
+    curves = [name for name in out.dependents() if not name.endswith('_err')]
+    assert len(curves) == len(paths) + 1

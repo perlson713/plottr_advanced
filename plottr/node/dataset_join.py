@@ -48,7 +48,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 
-from plottr import QtWidgets, Signal, Slot
+from plottr import QtCore, QtWidgets, Signal, Slot
 from ..data.datadict import DataDict, DataDictBase
 from ..data.datadict_storage import datadict_from_hdf5
 from .dependent_axis import swapDependentToAxis
@@ -475,7 +475,18 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.list.setToolTip(
             'Datasets drawn together with the one this window was opened on.')
-        self.list.setMaximumHeight(110)
+        # The list grows with what is in it, between these.  It used to have a
+        # fixed maximum of 110 px, and inside the dock that came out as a 20 px
+        # viewport: seven added files showed as one row, with no scrollbar to
+        # say otherwise, and the honest reading of that is "it only took one".
+        self.list.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                                QtWidgets.QSizePolicy.MinimumExpanding)
+        self.list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
+
+        self.count = QtWidgets.QLabel('')
+        self.count.setToolTip(
+            'How many datasets are drawn together, this window\'s own '
+            'included.')
 
         self.addButton = QtWidgets.QPushButton('Add...')
         self.removeButton = QtWidgets.QPushButton('Remove')
@@ -503,6 +514,7 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
         buttons.addWidget(self.addButton)
         buttons.addWidget(self.removeButton)
         buttons.addStretch()
+        buttons.addWidget(self.count)
 
         columnRow = QtWidgets.QHBoxLayout()
         columnRow.addWidget(QtWidgets.QLabel('Compare'))
@@ -534,12 +546,34 @@ class _JoinOptionsWidget(QtWidgets.QWidget):
 
     def setFiles(self, files: Sequence[str]) -> None:
         self.list.clear()
-        for path in files:
+        for number, path in enumerate(files, start=2):
             item = QtWidgets.QListWidgetItem(
-                f'{datasetLabel(path)}   —   {path}')
+                f'{number}.  {datasetLabel(path)}   —   {path}')
             item.setData(0x0100, str(path))
             item.setToolTip(str(path))
             self.list.addItem(item)
+        self._showCount(len(files))
+
+    #: How tall the list is allowed to get, in rows.  Enough to see a chip's
+    #: worth of resonators without the panel taking the whole window.
+    MIN_ROWS = 4
+    MAX_ROWS = 12
+
+    def _showCount(self, added: int) -> None:
+        """Say how many datasets are in, and give the list room for them.
+
+        The number is written out because a list that has to be scrolled is
+        the one thing that made this look as though it had a limit.
+        """
+        total = added + 1        # the dataset this window was opened on
+        self.count.setText(f'{total} datasets' if total > 1 else '')
+
+        row = self.list.sizeHintForRow(0) if self.list.count() else 0
+        if row <= 0:
+            row = self.fontMetrics().height() + 6
+        frame = 2 * self.list.frameWidth() + 4
+        rows = min(self.MAX_ROWS, max(self.MIN_ROWS, self.list.count()))
+        self.list.setMinimumHeight(rows * row + frame)
 
     @Slot()
     def _add(self) -> None:
