@@ -3,6 +3,7 @@ from numpy.testing import assert_allclose
 from plottr.data.datadict import DataDict
 from plottr.node.tools import linearFlowchart
 from plottr.node.scaleunits import ScaleUnits
+from plottr.plot.base import errorBarData
 
 import numpy as np
 
@@ -49,3 +50,27 @@ def test_basic_scale_units(qtbot):
     assert output['vals']['unit'] == ''
     assert_allclose(output['vals']['values'],
                     vv.flatten())
+
+
+def test_scaled_frequency_error_bar_uses_frequency_axis_unit(qtbot):
+    ScaleUnits.useUi = False
+    ScaleUnits.uiClass = None
+
+    fc = linearFlowchart(('scale_units', ScaleUnits))
+    data = DataDict(
+        power=dict(values=np.array([-40.0, -30.0]), unit='dBm'),
+        fr=dict(
+            values=np.array([7.0e9, 7.1e9]), axes=['power'], unit='Hz'),
+        fr_err=dict(
+            values=np.array([2.5e3, 3.0e3]), axes=['power'], unit='Hz'),
+    )
+    assert data.validate()
+
+    fc.setInput(dataIn=data)
+    output = fc.outputValues()['dataOut']
+
+    # ScaleUnits chooses useful labels independently...
+    assert output['fr']['unit'] == 'GHz'
+    assert output['fr_err']['unit'] == 'kHz'
+    # ...and the plotting helper converts the error magnitude to the y unit.
+    assert_allclose(errorBarData(output, 'fr'), [2.5e-6, 3.0e-6])

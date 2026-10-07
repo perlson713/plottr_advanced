@@ -17,6 +17,7 @@ from .. import Signal, Flowchart, QtWidgets
 from ..data.datadict import DataDictBase, DataDict, MeshgridDataDict
 from ..node import Node, linearFlowchart
 from ..utils import LabeledOptions
+from ..utils.find_scale_and_prefix import unit_conversion_factor
 
 __author__ = 'Wolfgang Pfaff'
 __license__ = 'MIT'
@@ -353,6 +354,10 @@ def errorBarData(
     dependent_values = np.asanyarray(data.data_vals(dependent))
     if error_values.shape != dependent_values.shape:
         return None
+    factor = unit_conversion_factor(
+        data[error_name].get('unit', ''), data[dependent].get('unit', ''))
+    if factor is not None:
+        error_values = error_values * factor
     return error_values
 
 

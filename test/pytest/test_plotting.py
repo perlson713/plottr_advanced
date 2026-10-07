@@ -67,6 +67,31 @@ def test_errorbar_column_from_name_convention():
     assert plottableDependents(dd) == ['signal']
 
 
+def test_errorbar_values_are_converted_to_dependent_unit():
+    dd = DataDict(
+        power=dict(values=np.array([-40.0, -30.0]), unit='dBm'),
+        fr=dict(
+            values=np.array([7.0, 7.1]), axes=['power'], unit='GHz'),
+        fr_err=dict(
+            values=np.array([2.5, 3.0]), axes=['power'], unit='kHz'),
+    )
+
+    np.testing.assert_allclose(errorBarData(dd, 'fr'), [2.5e-6, 3.0e-6])
+
+
+def test_explicit_errorbar_source_is_converted_to_dependent_unit():
+    dd = DataDict(
+        power=dict(values=np.array([-40.0, -30.0]), unit='dBm'),
+        fr=dict(
+            values=np.array([7.0, 7.1]), axes=['power'], unit='GHz'),
+        fit_sigma=dict(
+            values=np.array([2.5, 3.0]), axes=['power'], unit='kHz'),
+    )
+
+    np.testing.assert_allclose(
+        errorBarData(dd, 'fr', 'fit_sigma'), [2.5e-6, 3.0e-6])
+
+
 def test_errorbar_column_from_explicit_source():
     dd = DataDict(
         power=dict(values=np.arange(3)),

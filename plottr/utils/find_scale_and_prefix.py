@@ -3,7 +3,7 @@ Fallback module can be removed once we drop support for qcodes < 0.21
 """
 
 from collections import OrderedDict
-from typing import Set, Dict, Tuple
+from typing import Set, Dict, Tuple, Optional
 
 import numpy as np
 
@@ -91,3 +91,29 @@ def find_scale_and_prefix(data: np.ndarray, unit: str) -> Tuple[str, int]:
         prefix = ""
         selected_scale = 0
     return prefix, selected_scale
+
+
+def unit_conversion_factor(
+    source_unit: str, target_unit: str
+) -> Optional[float]:
+    """Return the multiplier converting source values to a target SI unit.
+
+    Units may differ only by an engineering prefix, for example ``kHz`` and
+    ``GHz``. ``None`` is returned when the units are not compatible.
+    """
+    def base_and_factor(unit: str) -> Tuple[str, float]:
+        if unit in _UNITS_FOR_RESCALING:
+            return unit, 1.0
+        for exponent, prefix in _ENGINEERING_PREFIXES.items():
+            if not prefix or not unit.startswith(prefix):
+                continue
+            base = unit[len(prefix):]
+            if base in _UNITS_FOR_RESCALING:
+                return base, float(10 ** exponent)
+        return unit, 1.0
+
+    source_base, source_factor = base_and_factor(source_unit)
+    target_base, target_factor = base_and_factor(target_unit)
+    if source_base != target_base:
+        return None
+    return source_factor / target_factor
