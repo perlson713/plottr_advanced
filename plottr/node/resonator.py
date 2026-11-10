@@ -16,9 +16,11 @@ The physics lives in ``resonator_fit.py`` of the measurement repository
 against synthetic traces, so this node imports it rather than growing a second
 implementation that could silently drift.  It is found
 
-1. through the ``RESONATOR_FIT_PATH`` environment variable (a directory),
-2. as a plain ``import resonator_fit`` (i.e. anywhere on ``PYTHONPATH``),
-3. next to the plottr checkout, in ``../qcodes_measurement``.
+1. through the ``RESONATOR_FIT_PATH`` environment variable (the
+   qcodes_measurement folder; the module is ``support/dataset_refit.py``),
+2. next to the plottr checkout, in ``../qcodes_measurement``,
+3. as ``support.dataset_refit`` already on ``sys.path`` (``PYTHONPATH`` or
+   the ``.pth`` file written by ``support/install_plottr_link.py``).
 
 If it cannot be found, the node passes the data through untouched and says so
 in its widget; nothing else in plottr depends on it.
@@ -42,9 +44,56 @@ from .node import Node, NodeWidget, updateOption
 __all__ = ['ResonatorFit', 'ResonatorFitWidget', 'resonator_fit_module']
 
 
+#: The version of the measurement repository's interface that this plottr was
+#: written against.  ``dataset_refit.PLOTTR_INTERFACE`` on the other side; a
+#: ``dataset_refit`` without that constant is version 1.  A mismatch is not an
+#: error (the node still runs on what both sides have), but the Status says
+#: which side is behind so the operator knows which repository to update.
+#:
+#: * 1 -- ``fittable_dependents``, ``default_dependent``, ``fit_datadict``,
+#:   ``recompute_photons``
+#: * 2 -- ``to_record_layout``: put the fitted data back into one record per
+#:   sweep, so that per-power columns (``Qi`` against ``power``) can be gridded
+MEASUREMENT_INTERFACE = 2
+
 #: cached result of :func:`resonator_fit_module`
 _MODULE: Optional[ModuleType] = None
 _MODULE_ERROR: str = ''
+
+
+def _locate(path: Path) -> Optional[Tuple[Path, str]]:
+    """Where ``dataset_refit`` is under ``path``, and the name to import it by.
+
+    The measurement repository moved its library code into a ``support``
+    package (``support/dataset_refit.py``, which itself does
+    ``from support import resonator_fit``).  Accept the repository root (the
+    usual setting), the ``support`` folder itself, and the old flat layout with
+    ``dataset_refit.py`` at the top.
+
+    :return: ``(folder to put on sys.path, module name)``, or ``None``.
+    """
+    if (path / 'support' / 'dataset_refit.py').is_file():
+        return path, 'support.dataset_refit'
+    if path.name == 'support' and (path / 'dataset_refit.py').is_file() \
+            and (path / '__init__.py').is_file():
+        return path.parent, 'support.dataset_refit'
+    if (path / 'dataset_refit.py').is_file():
+        return path, 'dataset_refit'  # the layout before the ``support`` package
+    return None
+
+
+def _interfaceNote(module: ModuleType) -> str:
+    """Say which repository is behind, if the two disagree; else ``''``."""
+    theirs = int(getattr(module, 'PLOTTR_INTERFACE', 1))
+    if theirs < MEASUREMENT_INTERFACE:
+        return (f'  The measurement repository is older than this plottr '
+                f'(interface {theirs} < {MEASUREMENT_INTERFACE}): update '
+                f'qcodes_measurement.')
+    if theirs > MEASUREMENT_INTERFACE:
+        return (f'  This plottr is older than the measurement repository '
+                f'(interface {MEASUREMENT_INTERFACE} < {theirs}): update '
+                f'plottr_advanced.')
+    return ''
 
 
 def resonator_fit_module() -> Tuple[Optional[ModuleType], str]:
@@ -55,6 +104,15 @@ def resonator_fit_module() -> Tuple[Optional[ModuleType], str]:
     physics.  The same module is what ``refit_dataset.py`` uses to write a
     fitted copy of a dataset offline, so the viewer and the offline tool cannot
     drift apart.
+
+    It is looked for, in this order:
+
+    1. under ``RESONATOR_FIT_PATH`` (the qcodes_measurement folder, or its
+       ``support`` folder),
+    2. next to the plottr checkout, in ``../qcodes_measurement``,
+    3. as ``support.dataset_refit`` / ``dataset_refit`` already importable
+       (``PYTHONPATH``, or the ``.pth`` file that
+       ``support/install_plottr_link.py`` puts into site-packages).
 
     :return: the module (or ``None``) and a message describing where it came
         from, or why it could not be imported.
@@ -69,22 +127,54 @@ def resonator_fit_module() -> Tuple[Optional[ModuleType], str]:
         candidates.append(Path(from_env).expanduser())
     # ../qcodes_measurement, relative to the plottr checkout.  This one only
     # works from a source checkout: installed into site-packages, its parent is
-    # site-packages, and the environment variable is the way in.
+    # site-packages, and the environment variable (or the .pth link) is the way in.
     candidates.append(Path(__file__).resolve().parents[2].parent / 'qcodes_measurement')
 
     found: List[Path] = []
+    names: List[str] = []
     for path in candidates:
-        if (path / 'dataset_refit.py').is_file():
-            found.append(path)
-            if str(path) not in sys.path:
-                sys.path.insert(0, str(path))
+        located = _locate(path)
+        if located is None:
+            continue
+        root, name = located
+        found.append(path)
+        if name not in names:
+            names.append(name)
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+    for name in ('support.dataset_refit', 'dataset_refit'):
+        if name not in names:
+            names.append(name)
 
-    try:
-        _MODULE = import_module('dataset_refit')
-        _MODULE_ERROR = f"using {getattr(_MODULE, '__file__', '?')}"
-    except Exception as exc:
-        _MODULE = None
-        _MODULE_ERROR = _whyNotImported(exc, candidates, found, from_env)
+    # The first error that is not merely "no module by this name" is the real
+    # reason (a missing scipy, a syntax error) and must not be hidden behind a
+    # later attempt at another layout.
+    real_error: Optional[BaseException] = None
+    any_error: Optional[BaseException] = None
+    for name in names:
+        try:
+            module = import_module(name)
+        except Exception as exc:  # noqa: BLE001 -- explained in the message
+            any_error = any_error or exc
+            not_here = isinstance(exc, ModuleNotFoundError) and \
+                getattr(exc, 'name', None) in (name, name.split('.')[0])
+            if not not_here:
+                real_error = real_error or exc
+            continue
+        if not hasattr(module, 'fit_datadict'):
+            # Some other package that happens to be called ``support``.
+            real_error = real_error or ImportError(
+                f'{getattr(module, "__file__", name)} has no fit_datadict')
+            continue
+        _MODULE = module
+        _MODULE_ERROR = (f"using {getattr(module, '__file__', '?')}"
+                         + _interfaceNote(module))
+        return _MODULE, _MODULE_ERROR
+
+    _MODULE = None
+    _MODULE_ERROR = _whyNotImported(
+        real_error or any_error or ImportError('dataset_refit'),
+        candidates, found, from_env)
     return _MODULE, _MODULE_ERROR
 
 
@@ -106,6 +196,9 @@ def _whyNotImported(exc: BaseException, candidates: List[Path],
     detail = f'{type(exc).__name__}: {exc}'
 
     if found:
+        located = _locate(found[0])
+        where = (located[0] / located[1].replace('.', os.sep)).with_suffix('.py') \
+            if located else found[0] / 'dataset_refit.py'
         missing = getattr(exc, 'name', None) if isinstance(
             exc, ImportError) else None
         advice = (
@@ -113,22 +206,23 @@ def _whyNotImported(exc: BaseException, candidates: List[Path],
             f'e.g. `pip install {"resonator-tools" if missing == "resonator_tools" else missing}`.'
             if missing else
             'Run it by hand to see the full traceback: '
-            f'`{sys.executable} -c "import dataset_refit"` '
-            f'with RESONATOR_FIT_PATH set.')
-        return (f'Found {found[0] / "dataset_refit.py"}, but importing it '
+            f'`{sys.executable} support/check_plottr_link.py` in the '
+            f'qcodes_measurement folder.')
+        return (f'Found {where}, but importing it '
                 f'failed ({detail}).  This is not a path problem.  {advice}')
 
     def describe(path: Path) -> str:
         if not path.is_dir():
             return f'{path} (no such folder)'
-        return f'{path} (folder exists, but no dataset_refit.py in it)'
+        return f'{path} (folder exists, but no support/dataset_refit.py in it)'
 
     looked = '; '.join(describe(path) for path in candidates) or 'nowhere'
     return (
         f'dataset_refit.py was not found ({detail}).  Looked in: {looked}.  '
-        'Set the RESONATOR_FIT_PATH environment variable to the folder that '
-        'contains dataset_refit.py (the qcodes_measurement checkout) and '
-        'restart plottr.'
+        'Set the RESONATOR_FIT_PATH environment variable to the '
+        'qcodes_measurement folder (the one that contains support/'
+        'dataset_refit.py), or run support/install_plottr_link.py with the '
+        'Python that runs plottr, and restart plottr.'
         + ('' if from_env else
            '  RESONATOR_FIT_PATH is not set in this process.'))
 
@@ -414,4 +508,11 @@ class ResonatorFit(Node):
             sweep_branch=self._sweepBranch,
             dependent=dependent or None,
         )
+        # The fit works on expanded data (one point per row).  Left like that,
+        # a per-power column such as ``Qi`` is repeated for every frequency
+        # point and the Grid node cannot guess a shape for it ("power ... has
+        # no variation along that axis"), so Qi vs power does not plot.  Put it
+        # back into one record per sweep, as the measurement wrote it.
+        if hasattr(module, 'to_record_layout'):
+            out = module.to_record_layout(out, data)
         return out, summary
