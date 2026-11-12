@@ -99,7 +99,8 @@ def test_traces_are_fitted_one_power_at_a_time(qtbot):
     fc, node = _flowchart()
     fc.setInput(dataIn=dataset)
     node.enabled = True
-    out = fc.outputValues()['dataOut']
+    # 出力は 1 レコード = 1 パワーの形（下のテスト）。点ごとに比べるので展開する。
+    out = fc.outputValues()['dataOut'].expand()
 
     powers = out.data_vals('power')
     fit = out.data_vals('s11_fit')
@@ -166,3 +167,30 @@ def test_the_measured_trace_is_preferred_over_a_calibrated_copy():
     assert refit.default_dependent(['s21_normalized', 's21']) == 's21'
     assert refit.default_dependent(['s11_cor']) == 's11_cor'
     assert refit.default_dependent([]) == ''
+
+
+def test_per_power_columns_can_be_gridded(qtbot):
+    """Qi vs power must plot.  The fit expands the data (one point per row);
+    passed on like that, ``s11_fit_Ql`` (axes ``['power']``) is repeated for
+    every frequency point and the Grid node stops with "power is expected to
+    be 0th axis but has no variation along that axis" -- an empty plot.  The
+    node has to hand the data back one record per power, as it came in."""
+    from plottr.data.datadict import datadict_to_meshgrid
+
+    if not hasattr(refit, 'to_record_layout'):
+        pytest.skip('qcodes_measurement is older than PLOTTR_INTERFACE 2')
+    dataset = _dataset()
+    fc, node = _flowchart()
+    fc.setInput(dataIn=dataset)
+    node.enabled = True
+    out = fc.outputValues()['dataOut']
+
+    assert out.data_vals('power').shape == (len(POWERS),)
+    assert out.data_vals('s11_fit_Ql').shape == (len(POWERS),)
+    assert out.data_vals('s11_fit').shape == dataset.data_vals('s11').shape
+    # 展開すれば元の展開形と同じ行が戻る（情報を落としていない）。
+    assert out.expand().data_vals('s11_fit').size == dataset.expand().data_vals('s11').size
+
+    selected = out.extract(['s11_fit_Ql'])
+    grid = datadict_to_meshgrid(selected)
+    assert grid.data_vals('s11_fit_Ql').shape == (len(POWERS),)

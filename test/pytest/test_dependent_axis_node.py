@@ -239,7 +239,7 @@ def _measurement_module():
 def _expected_photons(attenuation):
     """このデータセットの正解（測定スクリプトと同じ式＝ resonator_tools）。"""
     module = _measurement_module()
-    import resonator_fit as rf
+    rf = module.rf
 
     return [rf.photons_in_resonator(power - attenuation, fr=FR, Qc=qc, Qi=qi,
                                     port_type='reflection')
@@ -311,8 +311,7 @@ def test_attenuation_then_swap_gives_the_photon_axis(qtbot):
 def test_port_type_reaches_the_recomputation(qtbot):
     """Not cosmetic: from resonator-tools 2.2.0 notch carries half the
     coefficient of reflection, so the wrong choice is wrong by a factor 2."""
-    _measurement_module()
-    import resonator_fit as rf
+    rf = _measurement_module().rf
 
     fc, node = _flowchart()
     node.attenuation = '70'

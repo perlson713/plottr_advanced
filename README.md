@@ -12,6 +12,80 @@ A particular use case is data filtering and plotting.
 ## Documentation: 
 https://plottr.readthedocs.io (work in progress...)
 
+# plottr_advanced（このフォーク）について
+
+公開版の [plottr](https://github.com/toolsforexperiments/plottr) をもとに、共振器測定
+（[qcodes_measurement](https://github.com/perlson713/qcodes_measurement)）で使いやすいよう拡張したものです。
+主な追加: 複素平面表示とエラーバー（`<dep>_err` の自動認識）、`Resonator fit` / `Photon axis` /
+`Compare datasets` ノード、`Scale units`、図の `Style` / `Labels` / `Axes` / `Colors` / `Export...` /
+`Appearance`、monitr のテキスト読み込み（UTF-8）。
+
+## インストール（qcodes_measurement と並べる）
+
+qcodes_measurement と**同じフォルダに並べてクローン**し、編集可能インストールにしてください。
+
+```powershell
+git clone https://github.com/perlson713/qcodes_measurement.git
+git clone https://github.com/perlson713/plottr_advanced.git
+cd qcodes_measurement
+python -m pip install -r requirements.txt
+python -m pip install -e ..\plottr_advanced     # requirements.txt が入れたコピーを置き換える
+python support\check_plottr_link.py             # 結び付きと版の一致を確認
+```
+
+`pip install git+https://...plottr_advanced.git`（qcodes_measurement の `requirements.txt` も
+これ）は、**その時点の `main` を site-packages にコピーするだけ**です。後でこのリポジトリを更新しても、
+そのコピーは古いままです。どれが動いているかは
+`python -c "import plottr; print(plottr.__file__)"` で確認できます。
+
+## qcodes_measurement との結び付き
+
+`Resonator fit` と `Photon axis` は、フィットと光子数の計算を qcodes_measurement の
+`support/dataset_refit.py` に任せます（物理をこちらに書き写すと、検証済みの実装と黙って食い違うため）。
+探す順序は `plottr/node/resonator.py` の `resonator_fit_module()` にあります:
+
+1. 環境変数 `RESONATOR_FIT_PATH`（qcodes_measurement のフォルダ。`support` を指しても可）
+2. このリポジトリの隣の `../qcodes_measurement`（上のインストールならこれで見つかる）
+3. `sys.path` 上の `support.dataset_refit`（qcodes_measurement の `support/install_plottr_link.py`
+   が置く `.pth`、または `PYTHONPATH`）。`support/` に分ける前の旧構成（直下の `dataset_refit.py`）も読めます
+
+見つかればノードの `Status` は `using ...\support\dataset_refit.py`、見つからなければ探したフォルダと直し方を出します。
+
+### 版の照合
+
+接点の API は `plottr.node.resonator.MEASUREMENT_INTERFACE`（こちら）と
+`dataset_refit.PLOTTR_INTERFACE`（qcodes_measurement）で番号を付けてあり、いまは **2** です。
+食い違うと `Status` の末尾に `update qcodes_measurement` / `update plottr_advanced` と、
+**どちらが古いか**が出ます。**API を変えたら両方の番号を上げてください。**
+
+| 版 | 内容 |
+|---|---|
+| 1 | `fittable_dependents`・`default_dependent`・`fit_datadict`・`recompute_photons` |
+| 2 | `to_record_layout` — フィット結果を 1 レコード＝1 掃引の形に戻す |
+
+### 2026-11-10 の整合修正
+
+qcodes_measurement と別々に改変した結果、次の食い違いが出ていたので直しました
+（詳細は qcodes_measurement の README の「plottr_advancedとの整合」）。
+
+- **`Resonator fit` / `Photon axis` が測定リポジトリを見つけられなかった。** 2026-10-29 に向こうで
+  `dataset_refit.py` が `support/` パッケージへ移ったのに、こちらは `../qcodes_measurement/dataset_refit.py`
+  を探していた。上の順序で `support.dataset_refit` を探すようにした。
+- **ノードを通した後、`Qi` 対パワーが表示できなかった。** フィットはデータを展開（1 点＝1 行）して返すので、
+  パワーごとの量が周波数の点数ぶん複製され、Grid ノードが `power is expected to be 0th axis but has no
+  variation along that axis` で止まっていた。ノードの出力を `to_record_layout` で元の形に戻す。
+  当て直しのファイル（`refit_dataset.py`・`refit_raw_data.ipynb`）も同じ理由で表示できなかったので、
+  向こうも保存前に同じ処理をするようにした。
+- **テストが食い違いを見逃していた。** `test/pytest/test_resonator_node.py` と
+  `test_dependent_axis_node.py` は測定リポジトリが見つからないと**スキップ**する。探索が外れていたため
+  全部スキップされていた。探し方は `test/pytest/test_measurement_link.py`（測定リポジトリ不要）で押さえ、
+  Grid が Q 対パワーを格子にできることは `test_per_power_columns_can_be_gridded` で押さえる。
+
+```bash
+# 両リポジトリを並べた状態で（スキップされずに走ることを確認する）
+pytest -rs test/pytest/test_measurement_link.py test/pytest/test_resonator_node.py test/pytest/test_dependent_axis_node.py
+```
+
 # Quickstart
 
 ## Installation
