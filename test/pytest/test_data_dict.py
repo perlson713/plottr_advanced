@@ -224,6 +224,50 @@ def test_sanitizing_2d():
     assert num.arrays_equal(dd2.data_vals('b'), b_clean)
 
 
+def test_sanitizing_with_different_numbers_of_invalid_rows():
+    """従属変数ごとに NaN の行数が違っても落ちないこと。
+
+    合流したデータセットはまさにそれで、`Data selection` で曲線を選んだ
+    瞬間に `np.array(idxs)` が inhomogeneous shape で落ちていた。データ
+    セットの点数を揃えても、フィットに失敗したパワーの数が違えば起きる。
+    """
+    x = np.arange(6).astype(float)
+    first = np.arange(6).astype(float)
+    first[3:] = np.nan            # 3 行が NaN
+    second = np.arange(6).astype(float)
+    second[:2] = np.nan           # 2 行が NaN
+
+    dd = DataDict(
+        x=dict(values=x),
+        first=dict(values=first, axes=['x']),
+        second=dict(values=second, axes=['x']),
+    )
+    assert dd.validate()
+
+    cleaned = dd.remove_invalid_entries()
+    assert cleaned.validate()
+    # 両方とも NaN な行は 1 つも無いので、何も落ちない
+    assert num.arrays_equal(cleaned.data_vals('x'), x)
+
+
+def test_sanitizing_still_drops_rows_invalid_everywhere():
+    x = np.arange(4).astype(float)
+    first = np.array([1.0, np.nan, np.nan, 4.0])
+    second = np.array([np.nan, np.nan, 3.0, 4.0])
+
+    dd = DataDict(
+        x=dict(values=x),
+        first=dict(values=first, axes=['x']),
+        second=dict(values=second, axes=['x']),
+    )
+    assert dd.validate()
+
+    cleaned = dd.remove_invalid_entries()
+    # 1 行目だけが両方とも NaN
+    assert num.arrays_equal(cleaned.data_vals('x'),
+                            np.array([0.0, 2.0, 3.0]))
+
+
 def test_shape_guessing_simple():
     """test whether we can infer shapes correctly"""
 

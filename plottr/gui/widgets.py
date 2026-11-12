@@ -6,7 +6,7 @@ Common GUI widgets that are re-used across plottr.
 from typing import Union, List, Tuple, Optional, Sequence, Dict, Any, Type, Generic, TypeVar
 
 from .tools import dictToTreeWidgetItems
-from plottr import QtGui, Flowchart, QtWidgets, Signal, Slot
+from plottr import QtCore, QtGui, Flowchart, QtWidgets, Signal, Slot
 from plottr.node import Node, linearFlowchart
 from plottr.node.node import updateGuiQuietly, emitGuiUpdate
 from ..plot import PlotNode, PlotWidgetContainer, PlotWidget
@@ -107,6 +107,11 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.plotWidget: Optional[PlotWidget] = None
 
         self.nodeToolBar = QtWidgets.QToolBar('Node control', self)
+        # Every panel is named, icon or not.  Half of them had an icon and half
+        # did not, so the row read as four labelled buttons and three pictures
+        # with nothing to say what they open.
+        self.nodeToolBar.setToolButtonStyle(
+            QtCore.Qt.ToolButtonTextBesideIcon)
         self.addToolBar(self.nodeToolBar)
 
         self.nodeWidgets: Dict[str, QtWidgets.QDockWidget] = {}
@@ -153,6 +158,7 @@ class PlotWindow(QtWidgets.QMainWindow):
             action = d.toggleViewAction()
             if icon is not None:
                 action.setIcon(icon)
+            action.setToolTip(f'Show or hide the {node.name()} panel.')
             self.nodeToolBar.addAction(action)
 
             if not visible:

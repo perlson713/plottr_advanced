@@ -1034,8 +1034,15 @@ class DataDict(DataDictBase):
             idxs.append(_idxs)
 
         if len(idxs) > 0:
-            remove_idxs = reduce(np.intersect1d,
-                                 tuple(np.array(idxs).astype(int)))
+            # One index list per dependent, and they have different lengths as
+            # soon as two dependents have a different number of all-NaN rows --
+            # which is what a joined dataset is, and what one failed fit is
+            # enough to cause.  numpy refuses to stack those into one array
+            # ("inhomogeneous shape"), so the lists are converted one by one;
+            # the intersection never needed them stacked.
+            remove_idxs = reduce(
+                np.intersect1d,
+                tuple(np.asarray(i).astype(int) for i in idxs))
             for k, v in self.data_items():
                 v['values'] = np.delete(v['values'], remove_idxs, axis=0)
 
